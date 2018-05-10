@@ -13,15 +13,11 @@ QT *= \
 CONFIG *= console
 
 SOURCES += \
-    main.cpp \
-    packager.cpp
+    packager.cpp \
+    packagingjob.cpp \
 
 HEADERS += \
-    packager.h
-
-OTHER_FILES += \
-    README \
-    packager.qdoc \
+    packagingjob.h \
 
 load(qt_tool)
 

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -47,6 +47,7 @@
 
 #include <QtPlugin>
 #include <QProcess>
+#include <QVector>
 
 #include <QtAppManManager/abstractruntime.h>
 #include <QtAppManManager/abstractcontainer.h>
@@ -62,24 +63,19 @@ class Notification;
 class NativeRuntime;
 class NativeRuntimeInterface;
 class NativeRuntimeApplicationInterface;
+class ApplicationIPCInterface;
 
 class NativeRuntimeManager : public AbstractRuntimeManager
 {
     Q_OBJECT
 public:
-    explicit NativeRuntimeManager(QObject *parent = 0);
-    explicit NativeRuntimeManager(const QString &id, QObject *parent = 0);
+    explicit NativeRuntimeManager(QObject *parent = nullptr);
+    explicit NativeRuntimeManager(const QString &id, QObject *parent = nullptr);
 
     static QString defaultIdentifier();
     bool supportsQuickLaunch() const override;
 
     AbstractRuntime *create(AbstractContainer *container, const Application *app) override;
-
-    QDBusServer *applicationInterfaceServer() const;
-
-private:
-    QDBusServer *m_applicationInterfaceServer;
-    QVector<NativeRuntime *> m_nativeRuntimes;
 };
 
 class NativeRuntime : public AbstractRuntime
@@ -92,9 +88,9 @@ public:
     bool isQuickLauncher() const override;
     bool attachApplicationToQuickLauncher(const Application *app) override;
 
-    State state() const override;
     qint64 applicationProcessId() const override;
-    virtual void openDocument(const QString &document) override;
+    void openDocument(const QString &document, const QString &mimeType) override;
+    void setSlowAnimations(bool slow) override;
 
     bool sendNotificationUpdate(Notification *n);
 
@@ -104,13 +100,14 @@ public slots:
 
 signals:
     void aboutToStop(); // used for the ApplicationInterface
+    void interfaceCreated(const QString &interfaceName);
 
 private slots:
     void onProcessStarted();
     void onProcessFinished(int exitCode, QProcess::ExitStatus status);
     void onProcessError(QProcess::ProcessError error);
     void onDBusPeerConnection(const QDBusConnection &connection);
-    void onLauncherFinishedInitialization();
+    void onApplicationFinishedInitialization();
 
 protected:
     explicit NativeRuntime(AbstractContainer *container, const Application *app, NativeRuntimeManager *parent);
@@ -119,22 +116,25 @@ private:
     bool initialize();
     void shutdown(int exitCode, QProcess::ExitStatus status);
     void registerExtensionInterfaces();
+    QDBusServer *applicationInterfaceServer() const;
 
     bool m_isQuickLauncher;
     bool m_needsLauncher;
 
     QString m_document;
-    bool m_shutingDown = false;
-    bool m_started = false;
+    QString m_mimeType;
     bool m_launchWhenReady = false;
-    bool m_launched = false;
+    bool m_applicationInterfaceConnected = false;
     bool m_dbusConnection = false;
-    bool m_registeredExtensionInterfaces = false;
     QString m_dbusConnectionName;
 
-    NativeRuntimeApplicationInterface *m_applicationInterface = 0;
-    NativeRuntimeInterface *m_runtimeInterface = 0;
-    AbstractContainerProcess *m_process = 0;
+    QList<ApplicationIPCInterface *> m_applicationIPCInterfaces;
+    NativeRuntimeApplicationInterface *m_applicationInterface = nullptr;
+    NativeRuntimeInterface *m_runtimeInterface = nullptr;
+    AbstractContainerProcess *m_process = nullptr;
+    QDBusServer *m_applicationInterfaceServer;
+    bool m_slowAnimations = false;
+    QVariantMap m_openGLConfiguration;
 
     friend class NativeRuntimeManager;
 };

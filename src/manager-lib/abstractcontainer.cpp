@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -43,6 +43,34 @@
 
 #include "application.h"
 #include "abstractcontainer.h"
+
+
+/*!
+    \qmltype Container
+    \inqmlmodule QtApplicationManager
+    \brief The handle for a container, that an application's \l Runtime is using.
+
+    Instances of this class are available to the System-UI via an application's \l Runtime object,
+    while an application is running. Please see the \l{Containers}{Container documentation} for
+    an in-depth description of containers within the application-manager.
+
+    \note Applications running in single-process mode (even ones using the \c qml-inprocess runtime
+          while the application-manager is running in multi-process mode) will have no Container
+          object associated.
+*/
+/*!
+    \qmlproperty string Container::controlGroup
+
+    This property lets you get and set which control group the application's container will be in.
+    The control group name handled by this property is not the low-level name used by the operating
+    system, but an abstraction. See the \l{control group mapping}{container documentation} for more
+    details on how to setup this mapping.
+
+    \note Control groups are only supported on Linux through the kernel's \c cgroup system in the
+          built-in \c process container. Custom container plugins might not implement the necessary
+          interface.
+*/
+
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -88,9 +116,23 @@ AbstractContainerProcess *AbstractContainer::process() const
     return m_process;
 }
 
-AbstractContainer::AbstractContainer(AbstractContainerManager *manager)
+void AbstractContainer::setApplication(const Application *app)
+{
+    if (app != m_app) {
+        m_app = app;
+        emit applicationChanged(app);
+    }
+}
+
+const Application *AbstractContainer::application() const
+{
+    return m_app;
+}
+
+AbstractContainer::AbstractContainer(AbstractContainerManager *manager, const Application *app)
     : QObject(manager)
     , m_manager(manager)
+    , m_app(app)
 { }
 
 QVariantMap AbstractContainer::configuration() const
@@ -130,99 +172,6 @@ QVariantMap AbstractContainerManager::configuration() const
 void AbstractContainerManager::setConfiguration(const QVariantMap &configuration)
 {
     m_configuration = configuration;
-}
-
-
-ContainerDebugWrapper::ContainerDebugWrapper()
-    : m_stdRedirections(3, -1)
-{ }
-
-ContainerDebugWrapper::ContainerDebugWrapper(const QVariantMap &map)
-    : m_stdRedirections(3, -1)
-{
-    m_name = map.value(qSL("name")).toString();
-    m_command = map.value(qSL("command")).toStringList();
-    m_parameters = map.value(qSL("parameters")).toMap();
-    m_supportedContainers = map.value(qSL("supportedContainers")).toStringList();
-    m_supportedRuntimes = map.value(qSL("supportedRuntimes")).toStringList();
-
-    m_valid = !m_name.isEmpty() && !m_command.isEmpty();
-}
-
-QString ContainerDebugWrapper::name() const
-{
-    return m_name;
-}
-
-bool ContainerDebugWrapper::isValid() const
-{
-    return m_valid;
-}
-
-QStringList ContainerDebugWrapper::command() const
-{
-    return m_command;
-}
-
-bool ContainerDebugWrapper::supportsContainer(const QString &containerId) const
-{
-    return m_supportedContainers.contains(containerId);
-}
-
-bool ContainerDebugWrapper::supportsRuntime(const QString &runtimeId) const
-{
-    return m_supportedRuntimes.contains(runtimeId);
-}
-
-void ContainerDebugWrapper::setStdRedirections(const QVector<int> &stdRedirections)
-{
-    for (int i = 0; i < 3; ++i)
-        m_stdRedirections[i] = stdRedirections.value(i, -1);
-}
-
-QVector<int> ContainerDebugWrapper::stdRedirections() const
-{
-    return m_stdRedirections;
-}
-
-bool ContainerDebugWrapper::setParameter(const QString &key, const QVariant &value)
-{
-    auto it = m_parameters.find(key);
-    if (it == m_parameters.end())
-        return false;
-    *it = value;
-    return true;
-}
-
-void ContainerDebugWrapper::resolveParameters(const QString &program, const QStringList &arguments)
-{
-    for (auto it = m_parameters.cbegin(); it != m_parameters.cend(); ++it) {
-        QString key = qL1C('%') + it.key() + qL1C('%');
-        QString value = it.value().toString();
-
-        // replace variable name with value in command line and redirects
-        std::for_each(m_command.begin(), m_command.end(), [key, value](QString &str) {
-            str.replace(key, value);
-        });
-    }
-
-    QStringList args = arguments;
-
-    bool foundArgumentMarker = false;
-    for (int i = m_command.count() - 1; i >= 0; --i) {
-        QString str = m_command.at(i);
-        if (str == qL1S("%arguments%")) {
-            foundArgumentMarker = true;
-            continue;
-        }
-        str.replace(qL1S("%program%"), program);
-
-        if (i == 0 || foundArgumentMarker)
-            args.prepend(str);
-        else
-            args.append(str);
-    }
-    m_command = args;
 }
 
 QT_END_NAMESPACE_AM

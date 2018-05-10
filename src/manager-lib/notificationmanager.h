@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -56,6 +56,8 @@ class NotificationManager : public QAbstractListModel
 {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.freedesktop.Notifications")
+    Q_CLASSINFO("AM-QmlType", "QtApplicationManager/NotificationManager 1.0")
+
     Q_PROPERTY(int count READ count NOTIFY countChanged)
 
 public:
@@ -65,9 +67,9 @@ public:
     static QObject *instanceForQml(QQmlEngine *qmlEngine, QJSEngine *);
 
     // the item model part
-    int rowCount(const QModelIndex &parent = QModelIndex()) const;
-    QVariant data(const QModelIndex &index, int role) const;
-    QHash<int, QByteArray> roleNames() const;
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
+    QVariant data(const QModelIndex &index, int role) const override;
+    QHash<int, QByteArray> roleNames() const override;
 
     Q_INVOKABLE int count() const;
     Q_INVOKABLE QVariantMap get(int index) const;
@@ -99,7 +101,7 @@ private:
     uint notifyHelper(const QString &app_name, uint id, bool replaces, const QString &app_icon, const QString &summary, const QString &body, const QStringList &actions, const QVariantMap &hints, int timeout);
 
 private:
-    NotificationManager(QObject *parent = 0);
+    NotificationManager(QObject *parent = nullptr);
     NotificationManager(const NotificationManager &);
     NotificationManager &operator=(const NotificationManager &);
     static NotificationManager *s_instance;

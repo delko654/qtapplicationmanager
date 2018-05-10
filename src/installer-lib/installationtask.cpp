@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -39,6 +39,9 @@
 **
 ****************************************************************************/
 
+#include <QTemporaryDir>
+
+#include "logging.h"
 #include "applicationinstaller_p.h"
 #include "application.h"
 #include "packageextractor.h"
@@ -124,6 +127,26 @@
 
 QT_BEGIN_NAMESPACE_AM
 
+
+
+// The standard QTemporaryDir destructor cannot cope with read-only sub-directories.
+class TemporaryDir : public QTemporaryDir
+{
+public:
+    TemporaryDir()
+        : QTemporaryDir()
+    { }
+    explicit TemporaryDir(const QString &templateName)
+        : QTemporaryDir(templateName)
+    { }
+    ~TemporaryDir()
+    {
+        recursiveOperation(path(), safeRemove);
+    }
+private:
+    Q_DISABLE_COPY(TemporaryDir)
+};
+
 InstallationTask::InstallationTask(const InstallationLocation &installationLocation, const QUrl &sourceUrl, QObject *parent)
     : AsynchronousTask(parent)
     , m_ai(ApplicationInstaller::instance())
@@ -164,11 +187,11 @@ void InstallationTask::execute()
 {
     try {
         if (!m_installationLocation.isValid())
-            throw Exception(Error::System, "invalid installation location");
+            throw Exception("invalid installation location");
 
         TemporaryDir extractionDir;
         if (!extractionDir.isValid())
-            throw Exception(Error::System, "could not create a temporary extraction directory");
+            throw Exception("could not create a temporary extraction directory");
 
         // protect m_canceled and changes to m_extractor
         QMutexLocker locker(&m_mutex);
@@ -261,12 +284,12 @@ void InstallationTask::execute()
     {
         QMutexLocker locker(&m_mutex);
         delete m_extractor;
-        m_extractor = 0;
+        m_extractor = nullptr;
     }
 }
 
 
-void InstallationTask::checkExtractedFile(const QString &file) throw(Exception)
+void InstallationTask::checkExtractedFile(const QString &file) Q_DECL_NOEXCEPT_EXPR(false)
 {
     if (++m_extractedFileCount > 2)
         throw Exception(Error::Package, "could not find info.yaml and icon.png at the beginning of the package");
@@ -276,7 +299,7 @@ void InstallationTask::checkExtractedFile(const QString &file) throw(Exception)
             throw Exception(Error::Package, "found multiple info.yaml files in the package");
 
         YamlApplicationScanner yas;
-        m_app = yas.scan(m_extractor->destinationDirectory().absoluteFilePath(file));
+        m_app.reset(yas.scan(m_extractor->destinationDirectory().absoluteFilePath(file)));
         if (m_app->id() != m_extractor->installationReport().applicationId())
             throw Exception(Error::Package, "the application identifiers in --PACKAGE-HEADER--' and info.yaml do not match");
 
@@ -303,7 +326,7 @@ void InstallationTask::checkExtractedFile(const QString &file) throw(Exception)
     }
 
     if (m_foundIcon && m_foundInfo) {
-        qCDebug(LogInstaller) << "emit requestingInstallationAcknowledge" << id() << "<app>";
+        qCDebug(LogInstaller) << "emit requestingInstallationAcknowledge" << id() << "for app" << m_app->id();
         emit m_ai->taskRequestingInstallationAcknowledge(id(), m_app->toVariantMap());
 
         QDir oldDestinationDirectory = m_extractor->destinationDirectory();
@@ -319,29 +342,36 @@ void InstallationTask::checkExtractedFile(const QString &file) throw(Exception)
 
             QString path = m_extractionDir.absolutePath();
             path.chop(1); // remove the '+'
-            m_app->setBaseDir(path); //TODO: this is not correct for Images!!!!
+            m_app->setManifestDir(m_manifestDir.absolutePath());
+            if (m_installationLocation.isRemovable())
+                m_app->setCodeDir(m_app->manifestDir());
+            else
+                m_app->setCodeDir(path);
         }
+        // we need to find a free uid before we call startingApplicationInstallation
+        m_app->m_uid = m_ai->findUnusedUserId();
+        m_applicationUid = m_app->m_uid;
+
         // we need to call those ApplicationManager methods in the correct thread
         // this will also exclusively lock the application for us
         // m_app ownership is transferred to the ApplicationManager
+        m_app->moveToThread(ApplicationManager::instance()->thread());
+        QString appId = m_app->id(); // m_app is gone after the invoke
         QMetaObject::invokeMethod(ApplicationManager::instance(),
                                   "startingApplicationInstallation",
                                   Qt::BlockingQueuedConnection,
                                   Q_RETURN_ARG(bool, m_managerApproval),
                                   // ugly, but Q_ARG chokes on QT_PREPEND_NAMESPACE_AM...
-                                  QArgument<QT_PREPEND_NAMESPACE_AM(Application *)>(QT_STRINGIFY(QT_PREPEND_NAMESPACE_AM(Application *)), m_app));
+                                  QArgument<QT_PREPEND_NAMESPACE_AM(Application *)>(QT_STRINGIFY(QT_PREPEND_NAMESPACE_AM(Application *)), m_app.take()));
         if (!m_managerApproval)
-            throw Exception(Error::System, "Application Manager declined the installation of %1").arg(m_app->id());
-
-        // now that the Manager knows about the app object, we can try to find a free uid
-        m_app->m_uid = m_ai->findUnusedUserId();
+            throw Exception("Application Manager declined the installation of %1").arg(appId);
 
         // we're not interested in any other files from here on...
         m_extractor->setFileExtractedCallback(nullptr);
     }
 }
 
-void InstallationTask::startInstallation() throw (Exception)
+void InstallationTask::startInstallation() Q_DECL_NOEXCEPT_EXPR(false)
 {
     // 1. delete $manifestDir+ and $manifestDir-
     m_manifestDir = m_ai->manifestDirectory().absoluteFilePath(m_applicationId);
@@ -359,28 +389,28 @@ void InstallationTask::startInstallation() throw (Exception)
             throw Exception(Error::MediumNotAvailable, "installation medium %1 is not mounted").arg(m_installationLocation.id());
 
         if (m_ai->isPackageActivated(m_applicationId))
-            throw Exception(Error::System, "existing application image %1 is still mounted").arg(installationTarget);
+            throw Exception("existing application image %1 is still mounted").arg(installationTarget);
     } else {
         installationTarget = m_applicationId + qL1C('+');
     }
     if (installationDir.exists(installationTarget)) {
         if (!removeRecursiveHelper(installationDir.absoluteFilePath(installationTarget)))
-            throw Exception(Error::System, "could not remove old, partial installation %1/%2").arg(installationDir).arg(installationTarget);
+            throw Exception("could not remove old, partial installation %1/%2").arg(installationDir).arg(installationTarget);
     }
 
     // 3. create $manifestDir+
     if (!m_manifestDirPlusCreator.create(m_manifestDir.absolutePath() + qL1C('+')))
-        throw Exception(Error::System, "could not create manifest sub-directory %1+").arg(m_manifestDir);
+        throw Exception("could not create manifest sub-directory %1+").arg(m_manifestDir);
 
     // 4. create new installation
     if (m_installationLocation.isRemovable()) {
         if (!m_installationDirCreator.create(installationDir.absolutePath()))
-            throw Exception(Error::System, "could not create application image base directory %1").arg(installationDir);
+            throw Exception("could not create application image base directory %1").arg(installationDir);
 
         quint64 neededSize = qMax(m_extractor->installationReport().diskSpaceUsed(), quint64(70 * 1024));
 
         quint64 availableSize = 0;
-        if (!diskUsage(installationDir.absolutePath(), 0, &availableSize) || availableSize < neededSize) {
+        if (!m_installationLocation.installationDeviceFreeSpace(nullptr, &availableSize) || availableSize < neededSize) {
             throw Exception(Error::StorageSpace, "not enough storage space left on %1: %2 MB available, but %3 MB needed")
                     .arg(m_installationLocation.id())
                     .arg(double(availableSize) / (1024 * 1024), 0, 'f', 2)
@@ -404,30 +434,30 @@ void InstallationTask::startInstallation() throw (Exception)
         QDir tmpMountPoint(m_ai->applicationImageMountDirectory());
         tmpMountPoint = tmpMountPoint.absoluteFilePath(m_applicationId + qL1C('+'));
         if (!m_tmpMountPointCreator.create(tmpMountPoint.absolutePath()))
-            throw Exception(Error::System, "could not create temporary mountpoint %1").arg(tmpMountPoint);
+            throw Exception("could not create temporary mountpoint %1").arg(tmpMountPoint);
 
         if (!m_loopbackCreator.create(m_extractionImageFile))
-            throw Exception(Error::System, "could not create loopback device for %1: %2").arg(m_extractionImageFile, m_loopbackCreator.errorString());
+            throw Exception("could not create loopback device for %1: %2").arg(m_extractionImageFile, m_loopbackCreator.errorString());
 
         if (!SudoClient::instance()->mkfs(m_loopbackCreator.device()))
-            throw Exception(Error::System, "could not create filesystem on device %1: %2").arg(m_loopbackCreator.device(), SudoClient::instance()->lastError());
+            throw Exception("could not create filesystem on device %1: %2").arg(m_loopbackCreator.device(), SudoClient::instance()->lastError());
 
         if (!m_imageMounter.mount(m_loopbackCreator.device(), tmpMountPoint.absolutePath(), false /*ro*/))
-            throw Exception(Error::System, "could not mount device %1 on %2: %3").arg(m_loopbackCreator.device(), tmpMountPoint.absolutePath(), m_imageMounter.errorString());
+            throw Exception("could not mount device %1 on %2: %3").arg(m_loopbackCreator.device(), tmpMountPoint.absolutePath(), m_imageMounter.errorString());
 
         if (!m_extractionDir.cd(tmpMountPoint.absolutePath()))
-            throw Exception(Error::System, "could not cd into temporary mountpoint %1").arg(tmpMountPoint);
+            throw Exception("could not cd into temporary mountpoint %1").arg(tmpMountPoint);
     } else {
         if (!m_installationDirCreator.create(installationDir.absoluteFilePath(installationTarget)))
-            throw Exception(Error::System, "could not create installation directory %1/%2").arg(installationDir).arg(installationTarget);
+            throw Exception("could not create installation directory %1/%2").arg(installationDir).arg(installationTarget);
         m_extractionDir = installationDir;
         if (!m_extractionDir.cd(installationTarget))
-            throw Exception(Error::System, "could not cd into installation directory %1/%2").arg(installationDir).arg(installationTarget);
+            throw Exception("could not cd into installation directory %1/%2").arg(installationDir).arg(installationTarget);
         m_applicationDir = installationDir.absoluteFilePath(m_applicationId);
     }
 }
 
-void InstallationTask::finishInstallation() throw (Exception)
+void InstallationTask::finishInstallation() Q_DECL_NOEXCEPT_EXPR(false)
 {
     QDir documentDirectory(m_installationLocation.documentPath());
     ScopedDirectoryCreator documentDirCreator;
@@ -442,7 +472,7 @@ void InstallationTask::finishInstallation() throw (Exception)
             throw Exception(Error::MediumNotAvailable, "removable medium %1 is not mounted").arg(m_installationLocation.id());
 
         if (!QFile::exists(m_extractionImageFile))
-            throw Exception(Error::System, "removable medium %1 was removed during the installation").arg(m_installationLocation.id());
+            throw Exception("removable medium %1 was removed during the installation").arg(m_installationLocation.id());
 
         if ((destination == IntoImage) && QFile::exists(m_applicationImageFile))
             mode = Update;
@@ -456,9 +486,6 @@ void InstallationTask::finishInstallation() throw (Exception)
     // create the installation report
     InstallationReport report = m_extractor->installationReport();
     report.setInstallationLocationId(m_installationLocation.id());
-
-    //TODO: this is not really thread-safe - find a better way
-    m_app->setInstallationReport(new InstallationReport(report));
 
     QFile reportFile(m_manifestDirPlusCreator.dir().absoluteFilePath(qSL("installation-report.yaml")));
     if (!reportFile.open(QFile::WriteOnly) || !report.serialize(&reportFile))
@@ -478,7 +505,7 @@ void InstallationTask::finishInstallation() throw (Exception)
     SudoClient *root = SudoClient::instance();
 
     if (m_ai->isApplicationUserIdSeparationEnabled() && root) {
-        uid_t uid = m_app->uid();
+        uid_t uid = m_applicationUid;
         gid_t gid = m_ai->commonApplicationGroupId();
 
         if (!root->setOwnerAndPermissionsRecursive(documentDirectory.filePath(m_applicationId), uid, gid, 02700)) {

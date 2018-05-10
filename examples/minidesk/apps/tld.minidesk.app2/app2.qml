@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -54,11 +54,11 @@ import QtQuick 2.4
 import QtApplicationManager 1.0
 
 ApplicationManagerWindow {
-    color: ApplicationInterface.additionalConfiguration.light ? "peachpuff" : "black"
+    color: ApplicationInterface.systemProperties.light ? "peachpuff" : "black"
 
     Image {
         anchors.centerIn: parent
-        source: "icon.png"
+        source: ApplicationInterface.icon
 
         MouseArea {
             anchors.fill: parent

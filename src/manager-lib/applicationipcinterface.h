@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -57,11 +57,11 @@ class IpcProxyObject;
 class ApplicationIPCInterface : public QObject
 {
     Q_OBJECT
-
     Q_PROPERTY(QObject *serviceObject READ serviceObject WRITE setServiceObject NOTIFY serviceObjectChanged)
 
 public:
     explicit ApplicationIPCInterface(QObject *parent = nullptr);
+    ~ApplicationIPCInterface();
 
     QString interfaceName() const;
     QString pathName() const;

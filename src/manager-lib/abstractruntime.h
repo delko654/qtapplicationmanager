@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -44,6 +44,8 @@
 #include <QObject>
 #include <QString>
 #include <QProcess>
+#include <QPointer>
+#include <QVariantMap>
 
 #include <QtAppManCommon/global.h>
 
@@ -62,7 +64,7 @@ class AbstractRuntimeManager : public QObject
     Q_OBJECT
 
 public:
-    AbstractRuntimeManager(const QString &id, QObject *parent = 0);
+    AbstractRuntimeManager(const QString &id, QObject *parent = nullptr);
 
     static QString defaultIdentifier();
 
@@ -75,19 +77,27 @@ public:
     QVariantMap configuration() const;
     void setConfiguration(const QVariantMap &configuration);
 
-    QVariantMap additionalConfiguration() const;
-    void setAdditionalConfiguration(const QVariantMap &additionalConfiguration);
+    QVariantMap systemPropertiesBuiltIn() const;
+    QVariantMap systemProperties3rdParty() const;
+    void setSystemProperties(const QVariantMap &thirdParty, const QVariantMap &builtIn);
+
+    QVariantMap systemOpenGLConfiguration() const;
+    void setSystemOpenGLConfiguration(const QVariantMap &openGLConfiguration);
 
 private:
     QString m_id;
     QVariantMap m_configuration;
-    QVariantMap m_additionalConfiguration;
+    QVariantMap m_systemPropertiesBuiltIn;
+    QVariantMap m_systemProperties3rdParty;
+    QVariantMap m_systemOpenGLConfiguration;
 };
 
 
 class AbstractRuntime : public QObject
 {
     Q_OBJECT
+    Q_CLASSINFO("AM-QmlType", "QtApplicationManager/Runtime 1.0")
+
     Q_PROPERTY(AbstractContainer *container READ container)
 
 public:
@@ -104,26 +114,32 @@ public:
     const Application *application() const;
     AbstractRuntimeManager *manager() const;
 
+    virtual bool needsLauncher() const;
     virtual bool isQuickLauncher() const;
     virtual bool attachApplicationToQuickLauncher(const Application *app);
 
-    virtual State state() const = 0;
+    State state() const;
 
     enum { SecurityTokenSize = 16 };
     QByteArray securityToken() const;
 
-    virtual void openDocument(const QString &document);
+    virtual void openDocument(const QString &document, const QString &mimeType);
+
+    virtual void setSlowAnimations(bool slow);
 
     void setInProcessQmlEngine(QQmlEngine *view);
     QQmlEngine* inProcessQmlEngine() const;
 
     virtual qint64 applicationProcessId() const = 0;
 
-    QVariantMap additionalConfiguration() const;
+    QVariantMap systemProperties() const;
 
-public slots:
     virtual bool start() = 0;
     virtual void stop(bool forceKill = false) = 0;
+
+#if !defined(AM_HEADLESS)
+    virtual void inProcessSurfaceItemReleased(QQuickItem *);
+#endif
 
 signals:
     void stateChanged(QT_PREPEND_NAMESPACE_AM(AbstractRuntime::State) newState);
@@ -138,15 +154,17 @@ signals:
 
 protected:
     explicit AbstractRuntime(AbstractContainer *container, const Application *app, AbstractRuntimeManager *manager);
+    void setState(State newState);
 
     QVariantMap configuration() const;
 
     AbstractContainer *m_container;
-    const Application *m_app;
+    QPointer<const Application> m_app;
     AbstractRuntimeManager *m_manager;
 
     QByteArray m_securityToken;
     QQmlEngine *m_inProcessQmlEngine = nullptr;
+    State m_state = Inactive;
 
     friend class AbstractRuntimeManager;
 };

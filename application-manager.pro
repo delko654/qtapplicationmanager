@@ -1,4 +1,4 @@
-requires(linux:!android|win32-msvc2013|win32-msvc2015|osx)
+requires(linux|win32-msvc2013:!winrt|win32-msvc2015:!winrt|osx|win32-g++*)
 
 !tools-only:!qtHaveModule(qml):error("The QtQml library is required for a non 'tools-only' build")
 
@@ -6,44 +6,53 @@ TEMPLATE = subdirs
 CONFIG += ordered
 
 enable-tests:QT_BUILD_PARTS *= tests
+else:contains(QT_BUILD_PARTS, "tests"):CONFIG += enable-tests
 enable-examples:QT_BUILD_PARTS *= examples
+else:contains(QT_BUILD_PARTS, "examples"):CONFIG += enable-examples
 
 load(configure)
 qtCompileTest(libarchive)
 qtCompileTest(libyaml)
-qtCompileTest(libdbus)
-qtCompileTest(libcrypto)
+!headless:qtCompileTest(touchemulation)
 
-force-single-process:force-multi-process:error("You cannot both specify force-single-process and force-multi-process")
-force-multi-process:!headless:!qtHaveModule(compositor):!qtHaveModule(waylandcompositor):error("You forced multi-process mode, but the QtCompositor module is not available")
-force-multi-process:!config_libdbus:error("You forced multi-process mode, but libdbus-1 (>= 1.6) is not available")
-
-if(linux:!android|force-libcrypto) {
-    !config_libcrypto:error("Could not find a suitable libcrypto (needs OpenSSL >= 1.0.1 and < 1.1.0)")
-    !if(contains(QT_CONFIG,"openssl")|contains(QT_CONFIG,"openssl-linked")):error("Found libcrypto (OpenSSL), but Qt was built without OpenSSL support.")
+qtHaveModule(compositor)|if(qtHaveModule(waylandcompositor):qtHaveModule(waylandcompositor-private)) {
+    CONFIG += am_compatible_compositor
 }
 
-MIN_MINOR=6
+force-single-process:force-multi-process:error("You cannot both specify force-single-process and force-multi-process")
+force-multi-process:!headless:!am_compatible_compositor:error("You forced multi-process mode, but the QtCompositor module is not available")
+
+if(linux|force-libcrypto) {
+    !if(contains(QT_CONFIG,"openssl")|contains(QT_CONFIG,"openssl-linked")|contains(QT_CONFIG,"ssl")):error("Qt was built without OpenSSL support.")
+}
+
+MIN_MINOR=9
 
 !equals(QT_MAJOR_VERSION, 5)|lessThan(QT_MINOR_VERSION, $$MIN_MINOR):error("This application needs to be built against Qt 5.$${MIN_MINOR}+")
 
 load(am-config)
 
-!config_libarchive:SUBDIRS += 3rdparty/libarchive/libarchive.pro
-!config_libyaml:SUBDIRS += 3rdparty/libyaml/libyaml.pro
-
-linux:if(enable-libbacktrace|CONFIG(debug, debug|release))  {
-  check_libbacktrace = "yes"
-  SUBDIRS += 3rdparty/libbacktrace/libbacktrace.pro
-} else {
-  check_libbacktrace = "no"
+!config_libyaml|no-system-libyaml {
+    force-system-libyaml:error("Could not find a system installation for libyaml.")
+    else:SUBDIRS += 3rdparty/libyaml/libyaml.pro
+}
+!config_libarchive|no-system-libarchive {
+    force-system-libarchive:error("Could not find a system installation for libarchive.")
+    else:SUBDIRS += 3rdparty/libarchive/libarchive.pro
 }
 
-!tools-only: SUBDIRS += doc
+linux:!android:!disable-libbacktrace:if(enable-libbacktrace|CONFIG(debug, debug|release))  {
+    check_libbacktrace = "yes"
+    SUBDIRS += 3rdparty/libbacktrace/libbacktrace.pro
+} else {
+    check_libbacktrace = "no"
+}
+
+!tools-only: SUBDIRS += doc dummyimports
 
 load(qt_parts)
 
-tools-only {
+android|tools-only {
     # removing them from QT_BUILD_PARTS doesn't help
     SUBDIRS -= sub_tests
     SUBDIRS -= sub_examples
@@ -74,10 +83,13 @@ printConfigLine("Qt installation", $$[QT_HOST_BINS])
 printConfigLine("Debug or release", $$check_debug, white)
 printConfigLine("Installation prefix", $$INSTALL_PREFIX, auto)
 printConfigLine("Tools only build", $$yesNo(CONFIG(tools-only)), no)
+printConfigLine("Enable support for QtWidgets", $$yesNo(CONFIG(enable-widgets)), auto)
 printConfigLine("Headless", $$yesNo(CONFIG(headless)), auto)
-printConfigLine("QtCompositor support", $$yesNo(qtHaveModule(compositor)|qtHaveModule(waylandcompositor)), auto)
+printConfigLine("Touch emulation", $$yesNo(CONFIG(config_touchemulation)), auto)
+printConfigLine("QtCompositor support", $$yesNo(CONFIG(am_compatible_compositor)), auto)
 printConfigLine("Multi-process mode", $$check_multi, auto)
 printConfigLine("Installer enabled", $$yesNo(!CONFIG(disable-installer)), auto)
+printConfigLine("Ext. DBus interfaces enabled", $$yesNo(!CONFIG(disable-external-dbus-interfaces)), auto)
 printConfigLine("Tests enabled", $$yesNo(CONFIG(enable-tests)), auto)
 printConfigLine("Examples enabled", $$yesNo(CONFIG(enable-examples)), auto)
 printConfigLine("Crypto backend", $$check_crypto, auto)
@@ -86,8 +98,8 @@ printConfigLine("Shellserver support", $$yesNo(qtHaveModule(pshellserver)), auto
 printConfigLine("Genivi support", $$yesNo(qtHaveModule(geniviextras)), auto)
 printConfigLine("libbacktrace support", $$check_libbacktrace, auto)
 printConfigLine("Systemd workaround", $$yesNo(CONFIG(systemd-workaround)), auto)
-printConfigLine("System libarchive", $$yesNo(config_libarchive), auto)
-printConfigLine("System libyaml", $$yesNo(config_libyaml), auto)
+printConfigLine("System libarchive", $$yesNo(config_libarchive:!no-system-libarchive), auto)
+printConfigLine("System libyaml", $$yesNo(config_libyaml:!no-system-libyaml), auto)
 printConfigLine()
 
 OTHER_FILES += \
@@ -96,7 +108,11 @@ OTHER_FILES += \
     application-manager.conf \
     template-opt/am/*.yaml \
     qmake-features/*.prf \
-    sync.profile
+    sync.profile \
+    header.*[^~] \
+    LICENSE.*[^~] \
+    config.tests/libarchive/* \
+    config.tests/libyaml/* \
 
 GCOV_EXCLUDE = /usr/* \
                $$[QT_INSTALL_PREFIX]/* \
@@ -117,11 +133,11 @@ global-check-coverage.target = check-coverage
 global-check-coverage.depends = coverage
 global-check-coverage.commands = ( \
     find . -name \"*.gcov-info\" -print0 | xargs -0 rm -f && \
-    lcov -c -i -d . --rc lcov_branch_coverage=1 --rc geninfo_auto_base=1 -o base.gcov-info && \
+    lcov -c -i -d . --rc lcov_branch_coverage=1 --rc geninfo_auto_base=1 -o $$OUT_PWD/base.gcov-info && \
     cd tests && make check && cd .. && \
-    lcov -c -d . --rc lcov_branch_coverage=1 --rc geninfo_auto_base=1 -o test.gcov-info && \
-    lcov --rc lcov_branch_coverage=1 -o temp.gcov-info `find . -name \"*.gcov-info\" | xargs -n1 echo -a` && \
-    lcov --rc lcov_branch_coverage=1 -o application-manager.gcov-info -r temp.gcov-info $$GCOV_EXCLUDE_STR && \
+    lcov -c -d . --rc lcov_branch_coverage=1 --rc geninfo_auto_base=1 -o $$OUT_PWD/test.gcov-info && \
+    lcov --rc lcov_branch_coverage=1 -o $$OUT_PWD/temp.gcov-info `find . -name \"*.gcov-info\" | xargs -n1 echo -a` && \
+    lcov --rc lcov_branch_coverage=1 -o $$OUT_PWD/application-manager.gcov-info -r temp.gcov-info $$GCOV_EXCLUDE_STR && \
     rm -f base.gcov-info test.gcov-info temp.gcov-info && \
     genhtml -o branch-coverage -s -f --legend --branch-coverage --rc lcov_branch_coverage=1 --demangle-cpp application-manager.gcov-info && echo \"\\n\\nCoverage info is available at file://`pwd`/branch-coverage/index.html\" \
 )

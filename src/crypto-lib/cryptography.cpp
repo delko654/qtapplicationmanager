@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -61,14 +61,13 @@
 
 #if defined(AM_USE_LIBCRYPTO)
 #  include "libcryptofunction.h"
-#  include <openssl/err.h>
 
 QT_BEGIN_NAMESPACE_AM
 
 Q_GLOBAL_STATIC(QMutex, initMutex)
 
 // clazy:excludeall=non-pod-global-static
-static AM_LIBCRYPTO_FUNCTION(ERR_error_string_n);
+static AM_LIBCRYPTO_FUNCTION(ERR_error_string_n, void(*)(unsigned long, char *, size_t));
 
 QT_END_NAMESPACE_AM
 
@@ -134,7 +133,8 @@ QString Cryptography::errorString(qint64 osCryptoError, const char *errorDescrip
         LPWSTR msg = nullptr;
         FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                        nullptr, osCryptoError, 0, (LPWSTR) &msg, 0, nullptr);
-        result.append(QString::fromWCharArray(msg));
+        // remove potential \r\n at the end
+        result.append(QString::fromWCharArray(msg).trimmed());
         HeapFree(GetProcessHeap(), 0, msg);
     }
 #elif defined(Q_OS_OSX)

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -52,8 +52,8 @@ QT_BEGIN_NAMESPACE_AM
 class Notification : public QObject, public QQmlParserStatus
 {
     Q_OBJECT
+    Q_CLASSINFO("AM-QmlType", "QtApplicationManager/Notification 1.0")
     Q_INTERFACES(QQmlParserStatus)
-    Q_ENUMS(Priority)
 
     Q_PROPERTY(uint notificationId READ notificationId NOTIFY notificationIdChanged)
     Q_PROPERTY(bool visible READ isVisible WRITE setVisible NOTIFY visibleChanged)
@@ -76,10 +76,11 @@ class Notification : public QObject, public QQmlParserStatus
 
 public:
     enum Priority { Low, Normal, Critical };
+    Q_ENUM(Priority)
 
     enum ConstructionMode { Declarative, Dynamic };
 
-    Notification(QObject *parent = 0, ConstructionMode mode = Declarative);
+    Notification(QObject *parent = nullptr, ConstructionMode mode = Declarative);
 
     uint notificationId() const;
     QString summary() const;

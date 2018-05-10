@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -52,24 +52,23 @@ class ContainerInterface : public QObject
 public:
     virtual ~ContainerInterface();
 
+    virtual bool attachApplication(const QVariantMap &application) = 0;
+
     virtual QString controlGroup() const = 0;
     virtual bool setControlGroup(const QString &groupName) = 0;
 
     virtual bool setProgram(const QString &program) = 0;
     virtual void setBaseDirectory(const QString &baseDirectory) = 0;
 
-    virtual bool isReady() = 0;
+    virtual bool isReady() const = 0;
 
     virtual QString mapContainerPathToHost(const QString &containerPath) const = 0;
     virtual QString mapHostPathToContainer(const QString &hostPath) const = 0;
 
-    virtual bool start(const QStringList &arguments, const QProcessEnvironment &env) = 0;
-    virtual bool isStarted() = 0;
+    virtual bool start(const QStringList &arguments, const QMap<QString, QString> &runtimeEnvironment) = 0;
 
     virtual qint64 processId() const = 0;
     virtual QProcess::ProcessState state() const = 0;
-    virtual void setWorkingDirectory(const QString &dir) = 0;
-    virtual void setProcessEnvironment(const QProcessEnvironment &environment) = 0;
 
     virtual void kill() = 0;
     virtual void terminate() = 0;
@@ -87,11 +86,14 @@ class ContainerManagerInterface
 public:
     virtual ~ContainerManagerInterface();
 
-    virtual QString identifier() = 0;
+    virtual QString identifier() const = 0;
     virtual bool supportsQuickLaunch() const = 0;
     virtual void setConfiguration(const QVariantMap &configuration) = 0;
 
-    virtual ContainerInterface *create() = 0;
+    virtual ContainerInterface *create(bool isQuickLaunch,
+                                       const QVector<int> &stdioRedirections,
+                                       const QMap<QString, QString> &debugWrapperEnvironment,
+                                       const QStringList &debugWrapperCommand) = 0;
 };
 
 #define AM_ContainerManagerInterface_iid "io.qt.ApplicationManager.ContainerManagerInterface"

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -47,6 +47,12 @@
 
 QT_BEGIN_NAMESPACE_AM
 
+void fixNullValuesForQml(QVariant &v);
+void fixNullValuesForQml(QVariantList &list);
+void fixNullValuesForQml(QVariantMap &map);
+
 void retakeSingletonOwnershipFromQmlEngine(QQmlEngine *qmlEngine, QObject *singleton, bool immediately = false);
+
+void loadQmlDummyDataFiles(QQmlEngine *engine, const QString &directory);
 
 QT_END_NAMESPACE_AM

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,6 +41,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include <QJsonParseError>
 #include <QVector>
 #include <QByteArray>
@@ -78,7 +80,8 @@ private:
     QString m_errorString;
 };
 
-QVector<QVariant> variantDocumentsFromYaml(const QByteArray &yaml, ParseError *error = 0);
+QVector<QVariant> variantDocumentsFromYaml(const QByteArray &yaml, ParseError *error = nullptr);
+QVector<QVariant> variantDocumentsFromYamlFiltered(const QByteArray &yaml, std::function<QVariant(const QVariant &)> filter, ParseError *error = nullptr);
 
 enum YamlStyle { FlowStyle, BlockStyle };
 

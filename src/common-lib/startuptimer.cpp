@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -39,6 +39,12 @@
 **
 ****************************************************************************/
 
+#ifdef _WIN32
+// needed for QueryFullProcessImageNameW
+#  define WINVER _WIN32_WINNT_VISTA
+#  define _WIN32_WINNT _WIN32_WINNT_VISTA
+#endif
+
 #include "startuptimer.h"
 #include "utilities.h"
 
@@ -50,15 +56,149 @@
 #  include <time.h>
 #  include <qplatformdefs.h>
 #  include <sys/syscall.h>
+#  include <sys/sysinfo.h>
+#  if !defined(SYS_gettid)
+#    define SYS_gettid __NR_gettid
+#  endif
 #elif defined(Q_OS_OSX)
 #  include <unistd.h>
 #  include <sys/sysctl.h>
 #endif
 
+/*!
+    \qmltype StartupTimer
+    \inqmlmodule QtApplicationManager
+    \brief A tool for startup performance analysis.
+
+    The StartupTimer is a class for measuring the startup performance of the System-UI, as well as
+    applications started by application-manager.
+
+    Using the checkpoint function, you can log the time that elapsed since the executable was
+    started. In case of the System-UI, this is the time since the process was forked. This is also
+    true for applications that are not quick-launched. Quick-launched applications attach to a
+    process that has been pre-forked before the application has been started. In this case the
+    timer will be reset to the actual application start. The time is reported using a monotonic
+    clock with nano-second resolution - see QElapsedTimer for more information.
+
+    \note On Linux, the actual time between the forking of the process and the first checkpoint
+          can only be obtained with 10ms resolution.
+
+    In order to activate startup timing measurement, the \c $AM_STARTUP_TIMER environment variable
+    needs to be set: if set to \c 1, a startup performance analysis will be printed on the console.
+    Anything other than \c 1 will be interpreted as the name of a file that is used instead of the
+    console.
+
+    When activated, this report will always be printed for the System-UI. If the application-manager
+    is running in multi-process mode, additional reports will also be printed for every QML
+    application that is started. Note that the bar widths can only be compared within a report.
+
+    The application-manager and its QML launcher will already create a lot of checkpoints on their
+    own and will also call createReport themselves after all the C++ side setup has finished. You
+    can however add arbitrary checkpoints yourself using the QML API: access to the StartupTimer
+    object is possible through a the \c StartupTimer root-context property in the QML engine.
+
+    This is an example output, starting the \c Neptune UI on a console with ANSI color support:
+
+    \raw HTML
+    <style type="text/css" id="colorstyles">
+        #color-green  { color: #18b218 }
+        #color-orange { color: #b26818 }
+        #color-blue   { background-color: #5454ff; color: #000000 }
+    </style>
+    <pre>
+<span id="color-orange">== STARTUP TIMING REPORT: System-UI ==</span>
+<span id="color-green">0'110.001</span> entered main                                <span id="color-blue">   </span>
+<span id="color-green">0'110.015</span> after basic initialization                  <span id="color-blue">   </span>
+<span id="color-green">0'110.311</span> after sudo server fork                      <span id="color-blue">   </span>
+<span id="color-green">0'148.911</span> after application constructor               <span id="color-blue">    </span>
+<span id="color-green">0'150.086</span> after command line parse                    <span id="color-blue">    </span>
+<span id="color-green">0'150.154</span> after logging setup                         <span id="color-blue">    </span>
+<span id="color-green">0'150.167</span> after startup-plugin load                   <span id="color-blue">    </span>
+<span id="color-green">0'151.714</span> after installer setup checks                <span id="color-blue">    </span>
+<span id="color-green">0'151.847</span> after runtime registration                  <span id="color-blue">    </span>
+<span id="color-green">0'156.278</span> after application database loading          <span id="color-blue">    </span>
+<span id="color-green">0'158.450</span> after ApplicationManager instantiation      <span id="color-blue">     </span>
+<span id="color-green">0'158.477</span> after NotificationManager instantiation     <span id="color-blue">     </span>
+<span id="color-green">0'158.534</span> after SystemMonitor instantiation           <span id="color-blue">     </span>
+<span id="color-green">0'158.572</span> after quick-launcher setup                  <span id="color-blue">     </span>
+<span id="color-green">0'159.130</span> after ApplicationInstaller instantiation    <span id="color-blue">     </span>
+<span id="color-green">0'159.192</span> after QML registrations                     <span id="color-blue">     </span>
+<span id="color-green">0'164.888</span> after QML engine instantiation              <span id="color-blue">     </span>
+<span id="color-green">0'189.619</span> after D-Bus registrations                   <span id="color-blue">     </span>
+<span id="color-green">2'167.233</span> after loading main QML file                 <span id="color-blue">                                                        </span>
+<span id="color-green">2'167.489</span> after WindowManager/QuickView instantiation <span id="color-blue">                                                        </span>
+<span id="color-green">2'170.423</span> after window show                           <span id="color-blue">                                                        </span>
+<span id="color-green">2'359.482</span> after first frame drawn                     <span id="color-blue">                                                             </span></pre>
+\endraw
+*/
+
+/*!
+     \qmlproperty int StartupTimer::timeToFirstFrame
+
+     Provides the time from process start until rendering of the first frame in the HMI in
+     milliseconds.
+
+     \note Rendering of the first frame takes more time than just creating the QML root
+     component. Accessing this property from within the \c Component.onCompleted signal might
+     be too early.
+*/
+
+
+/*!
+     \qmlproperty int StartupTimer::systemUpTime
+
+     Provides the system's \e up time as provided by the underlying OS, measured up until the
+     initialization of the StartupTimer singleton in milliseconds.
+
+     This is helpful in calculating the time from boot to first frame drawn by adding up the
+     values of systemUpTime and timeToFirstFrame.
+*/
+
+/*!
+    \qmlmethod StartupTimer::checkpoint(string name)
+
+    Adds a new checkpoint with the elapsed time and the given \a name. Each checkpoint corresponds
+    to a single item in the output created by the next call to createReport.
+*/
+
+/*!
+    \qmlmethod StartupTimer::createReport(string title)
+
+    Outputs a report consisting of all checkpoints reported via the checkpoint function.
+    The \a title will be appended to the header of the report.
+
+    After outputting the report, all reported checkpoints will be cleared. This means that you can
+    call this function multiple times and only newly reported checkpoints will be printed.
+*/
+
 QT_BEGIN_NAMESPACE_AM
+
+struct SplitSeconds
+{
+    int sec;
+    int msec;
+    int usec;
+};
+
+static SplitSeconds splitMicroSecs(quint64 micros)
+{
+    SplitSeconds ss;
+
+    ss.sec = 0;
+    if (micros > 1000 * 1000) {
+        ss.sec = micros / (1000 * 1000);
+        micros %= (1000 * 1000);
+    }
+    ss.msec = micros / 1000;
+    ss.usec = micros % 1000;
+
+    return ss;
+}
 
 StartupTimer::StartupTimer()
 {
+    ::atexit([]() { delete s_instance; });
+
     QByteArray useTimer = qgetenv("AM_STARTUP_TIMER");
     if (useTimer.isNull())
         return;
@@ -81,6 +221,13 @@ StartupTimer::StartupTimer()
     } else {
         qWarning("StartupTimer: could not get process creation time");
     }
+
+    // Get system up time
+    // Resource https://msdn.microsoft.com/en-us/library/windows/desktop/ms724411(v=vs.85).aspx
+    if (m_initialized) {
+        m_systemUpTime = GetTickCount64();
+        emit systemUpTimeChanged(m_systemUpTime);
+    }
 #elif defined(Q_OS_LINUX)
     // Linux is stupid: there's only one way to get your own process' start time with a high
     // resolution: using the async netlink protocol to get a 'taskstat', but this is highly complex
@@ -94,7 +241,7 @@ StartupTimer::StartupTimer()
 
     // really bool (*)(quint32 *result), but casting the lambda does not work
     auto readJiffiesFromProc = [](void *resultPtr) -> void * {
-        void *result = 0;
+        void *result = nullptr;
 
         QByteArray file = "/proc/self/task/" + QByteArray::number((int) syscall(SYS_gettid)) + "/stat";
         int fd = QT_OPEN(file, O_RDONLY);
@@ -120,10 +267,10 @@ StartupTimer::StartupTimer()
 
     quint32 threadJiffies;
     pthread_t pt;
-    void *threadJiffiesOk = 0;
+    void *threadJiffiesOk = nullptr;
 
     // using clone() with CLONE_VFORK would be more efficient, but it messes up the NPTL internal state
-    if ((pthread_create(&pt, 0, readJiffiesFromProc, &threadJiffies) == 0)
+    if ((pthread_create(&pt, nullptr, readJiffiesFromProc, &threadJiffies) == 0)
             && (pthread_join(pt, &threadJiffiesOk) == 0)
             && threadJiffiesOk) {
 
@@ -143,17 +290,32 @@ StartupTimer::StartupTimer()
         qWarning("StartupTimer: could not read thread creation jiffies");
     }
 
+    // Checking the system up time
+    if (m_initialized) {
+        int fd = QT_OPEN("/proc/uptime", O_RDONLY);
+        if (fd >= 0) {
+            char buffer[32];
+            ssize_t bytesRead = QT_READ(fd, buffer, sizeof(buffer) - 1);
+            if (bytesRead > 0) {
+                buffer[bytesRead] = 0;
+                m_systemUpTime = quint64(strtod(buffer, nullptr) * 1000);
+                emit systemUpTimeChanged(m_systemUpTime);
+            }
+            QT_CLOSE(fd);
+        }
+    }
+
 #elif defined(Q_OS_OSX)
     int mibNames[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
     size_t procInfoSize;
 
-    if (sysctl(mibNames, sizeof(mibNames) / sizeof(mibNames[0]), 0, &procInfoSize, 0, 0) == 0) {
+    if (sysctl(mibNames, sizeof(mibNames) / sizeof(mibNames[0]), nullptr, &procInfoSize, nullptr, 0) == 0) {
         kinfo_proc *procInfo = (kinfo_proc *) malloc(procInfoSize);
 
-        if (sysctl(mibNames, sizeof(mibNames) / sizeof(mibNames[0]), procInfo, &procInfoSize, 0, 0) == 0) {
+        if (sysctl(mibNames, sizeof(mibNames) / sizeof(mibNames[0]), procInfo, &procInfoSize, nullptr, 0) == 0) {
             struct timeval now;
 
-            if (gettimeofday(&now, 0) == 0) {
+            if (gettimeofday(&now, nullptr) == 0) {
                 m_processCreation = (quint64(now.tv_sec) * 1000000 + now.tv_usec)
                         - (procInfo->kp_proc.p_un.__p_starttime.tv_sec * 1000000 + procInfo->kp_proc.p_un.__p_starttime.tv_usec);
                 m_initialized = true;
@@ -166,23 +328,39 @@ StartupTimer::StartupTimer()
         qWarning("StartupTimer: could not get size of kinfo_proc buffer");
     }
 
+    // Get system up time
+    if (m_initialized) {
+        struct timeval bootTime;
+        size_t bootTimeLen = sizeof(bootTime);
+        int mibNames[2] = { CTL_KERN, KERN_BOOTTIME };
+        if (sysctl(mibNames, sizeof(mibNames) / sizeof(mibNames[0]), &bootTime, &bootTimeLen, nullptr, 0) == 0 ) {
+            m_systemUpTime = (time(nullptr) - bootTime.tv_sec) * 1000; // we don't need more precision on macOS
+            emit systemUpTimeChanged(m_systemUpTime);
+        }
+    }
+
 #else
     qWarning("StartupTimer: not implemented on this platform");
     m_initialized = false;
 #endif
 
-    if (m_initialized) {
+    if (m_initialized)
         m_timer.start();
-        checkpoint("entered main");
-    }
+}
+
+StartupTimer *StartupTimer::s_instance = new StartupTimer();
+
+StartupTimer *StartupTimer::instance()
+{
+    return s_instance;
 }
 
 StartupTimer::~StartupTimer()
 {
-    createReport();
-
     if (m_output && m_output != stderr)
         fclose(m_output);
+
+    s_instance = nullptr;
 }
 
 void StartupTimer::checkpoint(const char *name)
@@ -195,56 +373,89 @@ void StartupTimer::checkpoint(const char *name)
 
 void StartupTimer::checkpoint(const QString &name)
 {
-    QByteArray ba = name.toLocal8Bit();
-    checkpoint(ba.constData());
+    if (Q_LIKELY(m_initialized)) {
+        QByteArray ba = name.toLocal8Bit();
+        checkpoint(ba.constData());
+    }
 }
 
-void StartupTimer::createReport()
+void StartupTimer::checkFirstFrame()
 {
-    if (m_output) {
-        bool colorSupport = canOutputAnsiColors(fileno(m_output));
+    if (Q_LIKELY(m_initialized)) {
+        QByteArray ba = "after first frame drawn";
+        m_timeToFirstFrame = m_timer.nsecsElapsed()/1000 + m_processCreation;
+        m_checkpoints << qMakePair(m_timeToFirstFrame, ba);
+        emit timeToFirstFrameChanged(m_timeToFirstFrame);
+    }
+}
 
-        if (!m_reportCreated) {
-            if (colorSupport) {
-                fprintf(m_output, "\n\033[33m== STARTUP TIMING REPORT ==\033[0m\n");
-            } else {
-                fprintf(m_output, "\n== STARTUP TIMING REPORT ==\n");
-            }
-        }
+void StartupTimer::reset()
+{
+    if (m_initialized) {
+        SplitSeconds delta = splitMicroSecs(m_timer.nsecsElapsed() / 1000 + m_processCreation);
+        m_timer.restart();
+        m_checkpoints.clear();
+        m_processCreation = 0;
 
-        static const int cols = 120;
+        const QString text = QString::asprintf("started %d'%03d.%03d after process launch",
+                                                         delta.sec, delta.msec, delta.usec);
+        m_checkpoints << qMakePair(0, text.toLocal8Bit().constData());
+    }
+}
+
+void StartupTimer::createReport(const QString &title)
+{
+    if (m_output && !m_checkpoints.isEmpty()) {
+        bool ansiColorSupport = false;
+        if (m_output == stderr)
+            getOutputInformation(&ansiColorSupport, nullptr, nullptr);
+
+        const char *format = "\n== STARTUP TIMING REPORT: %s ==\n";
+        if (ansiColorSupport)
+            format = "\n\033[33m== STARTUP TIMING REPORT: %s ==\033[0m\n";
+        fprintf(m_output, format, title.toLocal8Bit().data());
+
         static const int barCols = 60;
 
         int delta = m_checkpoints.isEmpty() ? 0 : m_checkpoints.last().first;
         qreal usecPerCell = delta / barCols;
-        int secondsLength = QByteArray::number(delta / 1000000).length();
+
+        int maxTextLen = 0;
+        for (int i = 0; i < m_checkpoints.size(); ++i) {
+            int textLen = m_checkpoints.at(i).second.length();
+            if (textLen > maxTextLen)
+                maxTextLen = textLen;
+        }
 
         for (int i = 0; i < m_checkpoints.size(); ++i) {
             quint64 usec = m_checkpoints.at(i).first;
             const QByteArray text = m_checkpoints.at(i).second;
-            int sec = 0;
             int cells = usec / usecPerCell;
-            QByteArray bar(cells, colorSupport ? ' ' : '#');
-            QByteArray spacing(cols - cells - 2 - secondsLength - 8 - text.length(), ' ');
+            QByteArray bar(cells, ansiColorSupport ? ' ' : '#');
+            QByteArray spacing(maxTextLen - text.length(), ' ');
+            SplitSeconds ss = splitMicroSecs(usec);
 
-            if (usec > 1000*1000) {
-                sec = usec / (1000*1000);
-                usec %= (1000*1000);
-            }
-            int msec = usec / 1000;
-            usec %= 1000;
+            const char *format = "%d'%03d.%03d %s %s#%s\n";
+            if (ansiColorSupport)
+                format = "\033[32m%d'%03d.%03d\033[0m %s %s\033[44m %s\033[0m\n";
 
-            if (colorSupport) {
-                fprintf(m_output, "\033[32m%d'%03d.%03d\033[0m %s %s\033[44m %s\033[0m\n", sec, msec, int(usec), text.constData(), spacing.constData(), bar.constData());
-            } else {
-                fprintf(m_output, "%d'%03d.%03d %s %s#%s\n", sec, msec, int(usec), text.constData(), spacing.constData(), bar.constData());
-            }
+            fprintf(m_output, format, ss.sec, ss.msec, ss.usec,
+                    text.constData(), spacing.constData(), bar.constData());
         }
-        fflush(m_output);
 
+        fflush(m_output);
         m_checkpoints.clear();
-        m_reportCreated = true;
     }
+}
+
+quint64 StartupTimer::timeToFirstFrame() const
+{
+    return m_timeToFirstFrame / 1000;
+}
+
+quint64 StartupTimer::systemUpTime() const
+{
+    return m_systemUpTime;
 }
 
 QT_END_NAMESPACE_AM

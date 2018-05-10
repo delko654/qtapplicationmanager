@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -43,6 +43,7 @@
 #include <QCoreApplication>
 #include <QThreadPool>
 
+#include "logging.h"
 #include "application.h"
 #include "abstractruntime.h"
 #include "abstractcontainer.h"
@@ -78,20 +79,15 @@ AbstractContainerManager *ContainerFactory::manager(const QString &id)
     return m_containers.value(id);
 }
 
-AbstractContainer *ContainerFactory::create(const QString &id)
+AbstractContainer *ContainerFactory::create(const QString &id, const Application *app,
+                                            const QVector<int> &stdioRedirections,
+                                            const QMap<QString, QString> &debugWrapperEnvironment,
+                                            const QStringList &debugWrapperCommand)
 {
     AbstractContainerManager *acm = manager(id);
     if (!acm)
         return nullptr;
-    return acm->create();
-}
-
-AbstractContainer *ContainerFactory::create(const QString &id, const ContainerDebugWrapper &debugWrapper)
-{
-    AbstractContainerManager *acm = manager(id);
-    if (!acm)
-        return nullptr;
-    return acm->create(debugWrapper);
+    return acm->create(app, stdioRedirections, debugWrapperEnvironment, debugWrapperCommand);
 }
 
 void ContainerFactory::setConfiguration(const QVariantMap &configuration)
@@ -112,6 +108,12 @@ bool ContainerFactory::registerContainer(AbstractContainerManager *manager, cons
         return false;
     m_containers.insert(identifier, manager);
     manager->setParent(this);
+    static bool once = false;
+    if (!once) {
+        qCDebug(LogSystem) << "Registering containers:";
+        once = true;
+    }
+    qCDebug(LogSystem).noquote() << " *" << identifier << (manager->supportsQuickLaunch() ? "[quicklaunch supported]" : "");
     return true;
 }
 

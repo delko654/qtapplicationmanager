@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -42,6 +42,7 @@
 #pragma once
 
 #include <QString>
+#include <QUrl>
 #include <QMap>
 #include <QVariant>
 #include <QStringList>
@@ -49,7 +50,6 @@
 #include <QObject>
 
 #include <QtAppManCommon/global.h>
-#include <QtAppManCommon/exception.h>
 #include <QtAppManApplication/installationreport.h>
 
 QT_BEGIN_NAMESPACE_AM
@@ -62,41 +62,49 @@ class InstallationReport;
 class Application : public QObject
 {
     Q_OBJECT
+    Q_CLASSINFO("AM-QmlType", "QtApplicationManager/Application 1.0")
 
-    Q_PROPERTY(QString id READ id)
-    Q_PROPERTY(QString runtimeName READ runtimeName)
-    Q_PROPERTY(QVariantMap runtimeParameters READ runtimeParameters)
-    Q_PROPERTY(QString icon READ icon)
-    Q_PROPERTY(QString documentUrl READ documentUrl)
-    Q_PROPERTY(qreal importance READ importance)
-    Q_PROPERTY(bool builtIn READ isBuiltIn)
-    Q_PROPERTY(bool alias READ isAlias)
-    Q_PROPERTY(bool preload READ isPreloaded)
-    Q_PROPERTY(const QT_PREPEND_NAMESPACE_AM(Application) *nonAliased READ nonAliased)
-    Q_PROPERTY(QStringList capabilities READ capabilities)
-    Q_PROPERTY(QStringList supportedMimeTypes READ supportedMimeTypes)
-    Q_PROPERTY(QStringList categories READ categories)
-    Q_PROPERTY(QT_PREPEND_NAMESPACE_AM(AbstractRuntime) *runtime READ currentRuntime)
-    Q_PROPERTY(int lastExitCode READ lastExitCode)
-    Q_PROPERTY(ExitStatus lastExitStatus READ lastExitStatus)
+    Q_PROPERTY(QString id READ id CONSTANT)
+    Q_PROPERTY(QString runtimeName READ runtimeName NOTIFY bulkChange)
+    Q_PROPERTY(QVariantMap runtimeParameters READ runtimeParameters NOTIFY bulkChange)
+    Q_PROPERTY(QUrl icon READ iconUrl NOTIFY bulkChange)
+    Q_PROPERTY(QString documentUrl READ documentUrl NOTIFY bulkChange)
+    Q_PROPERTY(qreal importance READ importance NOTIFY bulkChange)
+    Q_PROPERTY(bool builtIn READ isBuiltIn CONSTANT)
+    Q_PROPERTY(bool alias READ isAlias CONSTANT)
+    Q_PROPERTY(bool preload READ isPreloaded NOTIFY bulkChange)
+    Q_PROPERTY(const Application *nonAliased READ nonAliased CONSTANT)
+    Q_PROPERTY(QStringList capabilities READ capabilities NOTIFY bulkChange)
+    Q_PROPERTY(QStringList supportedMimeTypes READ supportedMimeTypes NOTIFY bulkChange)
+    Q_PROPERTY(QStringList categories READ categories NOTIFY bulkChange)
+    Q_PROPERTY(QVariantMap applicationProperties READ applicationProperties NOTIFY bulkChange)
+    Q_PROPERTY(AbstractRuntime *runtime READ currentRuntime NOTIFY runtimeChanged)
+    Q_PROPERTY(int lastExitCode READ lastExitCode NOTIFY lastExitCodeChanged)
+    Q_PROPERTY(ExitStatus lastExitStatus READ lastExitStatus NOTIFY lastExitStatusChanged)
+    Q_PROPERTY(QString version READ version NOTIFY bulkChange)
+    Q_PROPERTY(BackgroundMode backgroundMode READ backgroundMode NOTIFY bulkChange)
+    Q_PROPERTY(bool supportsApplicationInterface READ supportsApplicationInterface NOTIFY bulkChange)
+    Q_PROPERTY(QString codeDir READ codeDir NOTIFY bulkChange)
+    Q_PROPERTY(State state READ state NOTIFY stateChanged)
 
 public:
-    enum Type { Gui, Headless };
-    Q_ENUM(Type)
-
     enum ExitStatus { NormalExit, CrashExit, ForcedExit };
     Q_ENUM(ExitStatus)
 
     QString id() const;
+    int uniqueNumber() const;
     QString absoluteCodeFilePath() const;
     QString codeFilePath() const;
     QString runtimeName() const;
     QVariantMap runtimeParameters() const;
+    QVariantMap environmentVariables() const;
     QMap<QString, QString> names() const;
     Q_INVOKABLE QString name(const QString &language) const;
     QString icon() const;
+    QUrl iconUrl() const;
     QString documentUrl() const;
 
+    bool supportsApplicationInterface() const;
     bool isPreloaded() const;
     qreal importance() const;
     bool isBuiltIn() const;
@@ -106,7 +114,8 @@ public:
     QStringList capabilities() const;
     QStringList supportedMimeTypes() const;
     QStringList categories() const;
-    Type type() const;
+    QVariantMap applicationProperties() const;
+    QVariantMap allAppProperties() const;
 
     enum BackgroundMode
     {
@@ -116,26 +125,31 @@ public:
         PlaysAudio,
         TracksLocation
     };
+    Q_ENUM(BackgroundMode)
+
     BackgroundMode backgroundMode() const;
 
     QString version() const;
 
-    void validate() const throw (Exception);
+    QVariantMap openGLConfiguration() const;
+
+    void validate() const Q_DECL_NOEXCEPT_EXPR(false);
     QVariantMap toVariantMap() const;
     static Application *fromVariantMap(const QVariantMap &map, QString *error = 0);
     void mergeInto(Application *app) const;
 
     const InstallationReport *installationReport() const;
     void setInstallationReport(InstallationReport *report);
-    QDir baseDir() const;
+    QString manifestDir() const;
+    QString codeDir() const;
     uint uid() const;
 
     // dynamic part
     AbstractRuntime *currentRuntime() const;
     void setCurrentRuntime(AbstractRuntime *rt) const;
-    bool isLocked() const;
-    bool lock() const;
-    bool unlock() const;
+    bool isBlocked() const;
+    bool block() const;
+    bool unblock() const;
 
     enum State {
         Installed,
@@ -144,26 +158,44 @@ public:
         BeingRemoved
     };
     State state() const;
+    Q_ENUM(State)
     qreal progress() const;
 
-    void setBaseDir(const QString &path); //TODO: replace baseDir handling with something that works :)
+    void setSupportsApplicationInterface(bool supportsAppInterface);
+    void setCodeDir(const QString &path);
+    void setManifestDir(const QString &path);
     void setBuiltIn(bool builtIn);
 
     int lastExitCode() const;
     ExitStatus lastExitStatus() const;
+
+    static bool isValidApplicationId(const QString &appId, bool isAliasName = false, QString *errorString = nullptr);
+
+signals:
+    void bulkChange() const;
+    void runtimeChanged() const;
+    void lastExitCodeChanged() const;
+    void lastExitStatusChanged() const;
+    void activated() const;
+    void stateChanged(State state) const;
 
 private:
     Application();
 
     // static part from info.json
     QString m_id;
+    int m_uniqueNumber;
 
     QString m_codeFilePath; // relative to info.json location
     QString m_runtimeName;
     QVariantMap m_runtimeParameters;
+    QVariantMap m_environmentVariables;
     QMap<QString, QString> m_name; // language -> name
     QString m_icon; // relative to info.json location
     QString m_documentUrl;
+    QVariantMap m_allAppProperties;
+    QVariantMap m_sysAppProperties;
+    bool m_supportsApplicationInterface = false;
 
     bool m_preload = false;
     qreal m_importance = 0; // relative to all others, with 0 being "normal"
@@ -178,16 +210,17 @@ private:
 
     QString m_version;
 
+    QVariantMap m_openGLConfiguration;
+
     // added by installer
     QScopedPointer<InstallationReport> m_installationReport;
-    QDir m_baseDir;
+    QDir m_manifestDir;
+    QDir m_codeDir;
     uint m_uid = uint(-1); // unix user id - move to installationReport
-
-    Type m_type = Gui;
 
     // dynamic part
     mutable AbstractRuntime *m_runtime = 0;
-    mutable QAtomicInt m_locked;
+    mutable QAtomicInt m_blocked;
     mutable QAtomicInt m_mounted;
 
     mutable State m_state = Installed;
@@ -201,8 +234,8 @@ private:
     friend class ApplicationDatabase; // needed to create Application objects
     friend class InstallationTask; // needed to set m_uid and m_builtin during the installation
 
-    static Application *readFromDataStream(QDataStream &ds, const QVector<const Application *> &applicationDatabase) throw(Exception);
-    void writeToDataStream(QDataStream &ds, const QVector<const Application *> &applicationDatabase) const throw(Exception);
+    static Application *readFromDataStream(QDataStream &ds, const QVector<const Application *> &applicationDatabase) Q_DECL_NOEXCEPT_EXPR(false);
+    void writeToDataStream(QDataStream &ds, const QVector<const Application *> &applicationDatabase) const Q_DECL_NOEXCEPT_EXPR(false);
 
     Q_DISABLE_COPY(Application)
 };

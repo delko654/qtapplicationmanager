@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -48,6 +48,7 @@
 #include <qplatformdefs.h>
 #include <QDataStream>
 
+#include "logging.h"
 #include "sudo.h"
 #include "utilities.h"
 #include "exception.h"
@@ -56,6 +57,8 @@
 #include <errno.h>
 
 #if defined(Q_OS_LINUX)
+# include "processtitle.h"
+
 #  include <fcntl.h>
 #  include <unistd.h>
 #  include <sys/socket.h>
@@ -77,6 +80,20 @@ extern "C" int capget(cap_user_header_t header, const cap_user_data_t data);
 // Support for old/broken C libraries
 #  if defined(_LINUX_CAPABILITY_VERSION) && !defined(_LINUX_CAPABILITY_VERSION_1)
 #    define _LINUX_CAPABILITY_VERSION_1 _LINUX_CAPABILITY_VERSION
+#    define _LINUX_CAPABILITY_U32S_1    1
+#    if !defined(CAP_TO_INDEX)
+#      define CAP_TO_INDEX(x) ((x) >> 5)
+#    endif
+#    if !defined(CAP_TO_MASK)
+#      define CAP_TO_MASK(x)  (1 << ((x) & 31))
+#    endif
+#  endif
+#  if defined(_LINUX_CAPABILITY_VERSION_3) // use 64-bit support, if available
+#    define AM_CAP_VERSION _LINUX_CAPABILITY_VERSION_3
+#    define AM_CAP_SIZE    _LINUX_CAPABILITY_U32S_3
+#  else // fallback to 32-bit support
+#    define AM_CAP_VERSION _LINUX_CAPABILITY_VERSION_1
+#    define AM_CAP_SIZE    _LINUX_CAPABILITY_U32S_1
 #  endif
 
 // Missing support for dynamic loop device management
@@ -99,7 +116,7 @@ QT_BEGIN_NAMESPACE_AM
 static void sigHupHandler(int sig)
 {
     if (sig == SIGHUP)
-        abort();
+        _exit(0);
 }
 
 QT_END_NAMESPACE_AM
@@ -115,15 +132,14 @@ bool forkSudoServer(SudoDropPrivileges dropPrivileges, QString *errorString)
     int loopControlFd = -1;
 
 #if defined(Q_OS_LINUX)
-    // check for new style loopback device control
-    loopControlFd = EINTR_LOOP(open("/dev/loop-control", O_RDWR));
-    if (canSudo && (loopControlFd < 0))
-        qCCritical(LogSystem)  << "WARNING: could not open /dev/loop-control, which is needed by the installer for SD-Card installations";
-
     uid_t realUid = getuid();
     uid_t effectiveUid = geteuid();
     canSudo = (realUid == 0) || (effectiveUid == 0);
 
+    // check for new style loopback device control
+    loopControlFd = EINTR_LOOP(open("/dev/loop-control", O_RDWR));
+    if (canSudo && (loopControlFd < 0))
+        qCCritical(LogSystem) << "WARNING: could not open /dev/loop-control, which is needed by the installer for SD-Card installations";
 #else
     Q_UNUSED(errorString)
     Q_UNUSED(dropPrivileges)
@@ -132,9 +148,8 @@ bool forkSudoServer(SudoDropPrivileges dropPrivileges, QString *errorString)
     if (!canSudo) {
         SudoServer::initialize(-1, loopControlFd);
         SudoClient::initialize(-1, SudoServer::instance());
-        qCCritical(LogSystem)  << "WARNING: for the installer to work correctly, the executable needs to be run either as root via sudo or SUID (preferred)";
-        qCCritical(LogSystem)  << "         (using fallback implementation - you might experience permission errors on installer operations)";
-
+        qCCritical(LogSystem) << "WARNING: for the installer to work correctly, the executable needs to be run either as root via sudo or SUID (preferred)";
+        qCCritical(LogSystem) << "         (using fallback implementation - you might experience permission errors on installer operations)";
         return true;
     }
 
@@ -156,8 +171,10 @@ bool forkSudoServer(SudoDropPrivileges dropPrivileges, QString *errorString)
         realUid = sudoUid;
         realGid = qEnvironmentVariableIntValue("SUDO_GID");
 
-        setresgid(realGid, 0, 0);
-        setresuid(realUid, 0, 0);
+        if (setresgid(realGid, 0, 0) || setresuid(realUid, 0, 0)) {
+            *errorString = QString::fromLatin1("could not set real user or group ID : %1").arg(QString::fromLocal8Bit(strerror(errno)));
+            return false;
+        }
     }
 
     int socketFds[2];
@@ -196,29 +213,34 @@ bool forkSudoServer(SudoDropPrivileges dropPrivileges, QString *errorString)
         signal(SIGHUP, sigHupHandler);
 
         // Drop as many capabilities as possible, just to be on the safe side
-        QList<quint32> neededCapabilities = QList<quint32> {
-                CAP_SYS_ADMIN,
-                CAP_CHOWN,
-                CAP_FOWNER,
-                CAP_DAC_OVERRIDE
+        static const quint32 neededCapabilities[] = {
+            CAP_SYS_ADMIN,
+            CAP_CHOWN,
+            CAP_FOWNER,
+            CAP_DAC_OVERRIDE
         };
 
         bool capSetOk = false;
-        __user_cap_header_struct capHeader { _LINUX_CAPABILITY_VERSION_1, getpid() };
-        __user_cap_data_struct capData;
-        if (capget(&capHeader, &capData) == 0) {
-            quint32 capNeeded = 0;
-            foreach (quint32 cap, neededCapabilities)
-                capNeeded |= (1 << cap);
-
-            capData.effective = capData.permitted = capData.inheritable = capNeeded;
-            if (capset(&capHeader, &capData) == 0)
+        __user_cap_header_struct capHeader { AM_CAP_VERSION, getpid() };
+        __user_cap_data_struct capData[AM_CAP_SIZE];
+        if (capget(&capHeader, capData) == 0) {
+            quint32 capNeeded[AM_CAP_SIZE];
+            memset(&capNeeded, 0, sizeof(capNeeded));
+            for (quint32 cap : neededCapabilities) {
+                int idx = CAP_TO_INDEX(cap);
+                Q_ASSERT(idx < AM_CAP_SIZE);
+                capNeeded[idx] |= CAP_TO_MASK(cap);
+            }
+            for (int i = 0; i < AM_CAP_SIZE; ++i)
+                capData[i].effective = capData[i].permitted = capData[i].inheritable = capNeeded[i];
+            if (capset(&capHeader, capData) == 0)
                 capSetOk = true;
         }
         if (!capSetOk)
             qCCritical(LogSystem) << "could not drop privileges in the SudoServer process -- continuing with full root privileges";
 
         if (SudoServer::initialize(socketFds[0], loopControlFd)) {
+            ProcessTitle::setTitle("%s", "sudo helper");
             SudoServer::instance()->run();
         } else {
             qCCritical(LogSystem) << "could not initialize the SudoClient";
@@ -241,12 +263,18 @@ bool forkSudoServer(SudoDropPrivileges dropPrivileges, QString *errorString)
     if (realUid != effectiveUid) {
         // drop all root privileges
         if (dropPrivileges == DropPrivilegesPermanently) {
-            setresgid(realGid, realGid, realGid);
-            setresuid(realUid, realUid, realUid);
+            if (setresgid(realGid, realGid, realGid) || setresuid(realUid, realUid, realUid)) {
+                *errorString = QString::fromLatin1("could not set real user or group ID : %1").arg(QString::fromLocal8Bit(strerror(errno)));
+                kill(pid, 9);
+                return false;
+            }
         } else {
             qCCritical(LogSystem) << "\nSudo was instructed to NOT drop root privileges permanently.\nThis is dangerous and should only be used in auto-tests!\n";
-            setresgid(realGid, realGid, 0);
-            setresuid(realUid, realUid, 0);
+            if (setresgid(realGid, realGid, 0) || setresuid(realUid, realUid, 0)) {
+                *errorString = QString::fromLatin1("could not set real user or group ID : %1").arg(QString::fromLocal8Bit(strerror(errno)));
+                kill(pid, 9);
+                return false;
+            }
         }
     }
     ::atexit([]() { SudoClient::instance()->stopServer(); });
@@ -295,11 +323,16 @@ QByteArray SudoInterface::receiveMessage(int socket, MessageType type, QString *
 #endif // Q_OS_LINUX
 
 
-SudoClient *SudoClient::s_instance = 0;
+SudoClient *SudoClient::s_instance = nullptr;
 
 SudoClient *SudoClient::instance()
 {
     return s_instance;
+}
+
+bool SudoClient::isFallbackImplementation() const
+{
+    return m_socket < 0;
 }
 
 SudoClient::SudoClient(int socketFd)
@@ -398,7 +431,7 @@ QByteArray SudoClient::call(const QByteArray &msg)
 
 
 
-SudoServer *SudoServer::s_instance = 0;
+SudoServer *SudoServer::s_instance = nullptr;
 
 SudoServer *SudoServer::instance()
 {
@@ -583,13 +616,18 @@ bool SudoServer::detachLoopback(const QString &loopDev)
         if ((loopFd = EINTR_LOOP(open(loopDev.toLocal8Bit(), O_RDWR))) < 0)
             throw Exception(Error::IO, "could not open loop device %1: %2").arg(loopDev).arg(QString::fromLocal8Bit(strerror(errno)));
 
+        // we are working with very small delays in the micro-second range here, so a linear factor
+        // to support valgrind would have to be very large and probably conflict with usage elsewhere
+        // in the codebase, where the ranges are normally in the seconds.
+        static const int timeout = timeoutFactor() * timeoutFactor() * 50;
+
         int clearErrno = 0;
         for (int tries = 0; tries < 100; ++tries) {
             if (EINTR_LOOP(ioctl(loopFd, LOOP_CLR_FD, 0)) == 0)
                 break;
 
             clearErrno = errno;
-            usleep(50); // might still be busy after lazy umount
+            usleep(timeout); // might still be busy after lazy umount
         }
 
         EINTR_LOOP(close(loopFd));
@@ -681,18 +719,18 @@ bool SudoServer::mkfs(const QString &device, const QString &fstype, const QStrin
 
     try {
         if (!QFile::exists(device))
-            throw Exception(Error::System, "device %1 does not exist").arg(device);
+            throw Exception("device %1 does not exist").arg(device);
 
         QString mkfsCmd = mkfsBaseCmd + fstype;
 
         if (!QFileInfo(mkfsCmd).isExecutable())
-            throw Exception(Error::System, "the binary %1 is not available and executable").arg(mkfsCmd);
+            throw Exception("the binary %1 is not available and executable").arg(mkfsCmd);
 
         QStringList mkfsOptions = options;
 
         if (isExt2) {
             if (!QFileInfo(tune2fsCmd).isExecutable())
-                throw Exception(Error::System, "the binary %1 is not available and executable").arg(tune2fsCmd);
+                throw Exception("the binary %1 is not available and executable").arg(tune2fsCmd);
 
             // defaults to create a loop mounted app image
             if (options.isEmpty()) {
@@ -708,14 +746,16 @@ bool SudoServer::mkfs(const QString &device, const QString &fstype, const QStrin
 
         mkfsOptions << device;
 
+        static const int timeout = 20000 * timeoutFactor();
+
         QProcess p;
         p.setProgram(mkfsCmd);
         p.setArguments(mkfsOptions);
 
         p.start();
-        p.waitForFinished();
+        p.waitForFinished(timeout);
         if (p.exitCode() != 0) {
-            throw Exception(Error::System, "could not create an %1 filesystem on %2: %3")
+            throw Exception("could not create an %1 filesystem on %2: %3")
                 .arg(fstype).arg(device).arg(QString::fromLocal8Bit(p.readAllStandardError()));
         }
 
@@ -726,9 +766,9 @@ bool SudoServer::mkfs(const QString &device, const QString &fstype, const QStrin
                                          << qSL("-i") << qSL("0")
                                          << device);
             p.start();
-            p.waitForFinished();
+            p.waitForFinished(timeout);
             if (p.exitCode() != 0) {
-                throw Exception(Error::System, "could not disable ext2 filesystem checks on %2: %3")
+                throw Exception("could not disable ext2 filesystem checks on %2: %3")
                         .arg(device).arg(QString::fromLocal8Bit(p.readAllStandardError()));
             }
         }
@@ -748,7 +788,7 @@ bool SudoServer::mkfs(const QString &device, const QString &fstype, const QStrin
 bool SudoServer::removeRecursive(const QString &fileOrDir)
 {
     try {
-        if (!recursiveOperation(fileOrDir, SafeRemove()))
+        if (!recursiveOperation(fileOrDir, safeRemove))
             throw Exception(errno, "could not recursively remove %1").arg(fileOrDir);
         return true;
     } catch (const Exception &e) {
@@ -760,8 +800,29 @@ bool SudoServer::removeRecursive(const QString &fileOrDir)
 bool SudoServer::setOwnerAndPermissionsRecursive(const QString &fileOrDir, uid_t user, gid_t group, mode_t permissions)
 {
 #if defined(Q_OS_LINUX)
+    static auto setOwnerAndPermissions =
+            [user, group, permissions](const QString &path, RecursiveOperationType type) -> bool {
+        if (type == RecursiveOperationType::EnterDirectory)
+            return true;
+
+        const QByteArray localPath = path.toLocal8Bit();
+        mode_t mode = permissions;
+
+        if (type == RecursiveOperationType::LeaveDirectory) {
+            // set the x bit for directories, but only where it makes sense
+            if (mode & 06)
+                mode |= 01;
+            if (mode & 060)
+                mode |= 010;
+            if (mode & 0600)
+                mode |= 0100;
+        }
+
+        return ((chmod(localPath, mode) == 0) && (chown(localPath, user, group) == 0));
+    };
+
     try {
-        if (!recursiveOperation(fileOrDir, SetOwnerAndPermissions(user, group, permissions))) {
+        if (!recursiveOperation(fileOrDir, setOwnerAndPermissions)) {
             throw Exception(errno, "could not recursively set owner and permission on %1 to %2:%3 / %4")
                 .arg(fileOrDir).arg(user).arg(group).arg(permissions, 4, 8, QLatin1Char('0'));
         }

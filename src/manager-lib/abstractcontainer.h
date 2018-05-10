@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -44,7 +44,8 @@
 #include <QObject>
 #include <QString>
 #include <QProcess>
-#include <QDir>
+#include <QVariantMap>
+#include <QVector>
 
 #include <QtAppManCommon/global.h>
 
@@ -53,49 +54,20 @@ QT_BEGIN_NAMESPACE_AM
 class Application;
 class AbstractContainer;
 
-class ContainerDebugWrapper
-{
-public:
-    ContainerDebugWrapper();
-    ContainerDebugWrapper(const QVariantMap &map);
-
-    QString name() const;
-    bool isValid() const;
-    QStringList command() const;
-
-    bool supportsContainer(const QString &containerId) const;
-    bool supportsRuntime(const QString &runtimeId) const;
-
-    void setStdRedirections(const QVector<int> &stdRedirections);
-    QVector<int> stdRedirections() const;
-
-    bool setParameter(const QString &key, const QVariant &value);
-    void resolveParameters(const QString &program, const QStringList &arguments);
-
-private:
-    QString m_name;
-    QStringList m_command;
-    QVariantMap m_parameters;
-    QStringList m_supportedRuntimes;
-    QStringList m_supportedContainers;
-    QVector<int> m_stdRedirections;
-    bool m_valid = false;
-};
-
-
 class AbstractContainerManager : public QObject
 {
     Q_OBJECT
 public:
-    AbstractContainerManager(const QString &id, QObject *parent = 0);
+    AbstractContainerManager(const QString &id, QObject *parent = nullptr);
 
     static QString defaultIdentifier();
 
     QString identifier() const;
     virtual bool supportsQuickLaunch() const;
 
-    virtual AbstractContainer *create() = 0;
-    virtual AbstractContainer *create(const ContainerDebugWrapper &debugWrapper) = 0;
+    virtual AbstractContainer *create(const Application *app, const QVector<int> &stdioRedirections,
+                                      const QMap<QString, QString> &debugWrapperEnvironment,
+                                      const QStringList &debugWrapperCommand) = 0;
 
     QVariantMap configuration() const;
     virtual void setConfiguration(const QVariantMap &configuration);
@@ -112,8 +84,6 @@ class AbstractContainerProcess : public QObject
 public:
     virtual qint64 processId() const = 0;
     virtual QProcess::ProcessState state() const = 0;
-    virtual void setWorkingDirectory(const QString &dir) = 0;
-    virtual void setProcessEnvironment(const QProcessEnvironment &environment) = 0;
 
 public slots:
     virtual void kill() = 0;
@@ -129,6 +99,8 @@ signals:
 class AbstractContainer : public QObject
 {
     Q_OBJECT
+    Q_CLASSINFO("AM-QmlType", "QtApplicationManager/Container 1.0")
+
     Q_PROPERTY(QString controlGroup READ controlGroup WRITE setControlGroup)
 
 public:
@@ -145,15 +117,22 @@ public:
     virtual QString mapContainerPathToHost(const QString &containerPath) const;
     virtual QString mapHostPathToContainer(const QString &hostPath) const;
 
-    virtual AbstractContainerProcess *start(const QStringList &arguments, const QProcessEnvironment &env) = 0;
+    virtual AbstractContainerProcess *start(const QStringList &arguments,
+                                            const QMap<QString, QString> &runtimeEnvironment) = 0;
 
     AbstractContainerProcess *process() const;
 
+    void setApplication(const Application *app);
+    const Application *application() const;
+
 signals:
     void ready();
+    void memoryLowWarning();
+    void memoryCriticalWarning();
+    void applicationChanged(const Application *newApplication);
 
 protected:
-    explicit AbstractContainer(AbstractContainerManager *manager);
+    explicit AbstractContainer(AbstractContainerManager *manager, const Application *app);
 
     QVariantMap configuration() const;
 
@@ -161,6 +140,7 @@ protected:
     QString m_baseDirectory;
     AbstractContainerManager *m_manager;
     AbstractContainerProcess *m_process = nullptr;
+    const Application *m_app;
 };
 
 QT_END_NAMESPACE_AM

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -47,9 +47,8 @@
 
 #include <archive.h>
 
-#include "packageextractor.h"
+#include <QtAppManPackage/packageextractor.h>
 #include <QtAppManApplication/installationreport.h>
-#include <QtAppManCommon/exception.h>
 
 QT_FORWARD_DECLARE_CLASS(QCryptographicHash)
 
@@ -75,7 +74,7 @@ private slots:
 private:
     void setError(Error errorCode, const QString &errorString);
     qint64 readTar(struct archive *ar, const void **archiveBuffer);
-    void processMetaData(const QByteArray &metadata, QCryptographicHash &digest, bool isHeader) throw(Exception);
+    void processMetaData(const QByteArray &metadata, QCryptographicHash &digest, bool isHeader) Q_DECL_NOEXCEPT_EXPR(false);
 
 private:
     PackageExtractor *q;
@@ -90,7 +89,7 @@ private:
 
     QEventLoop m_loop;
     QNetworkAccessManager *m_nam;
-    QNetworkReply *m_reply = 0;
+    QNetworkReply *m_reply = nullptr;
     bool m_downloadingFromFIFO = false;
     QByteArray m_buffer;
     InstallationReport m_report;

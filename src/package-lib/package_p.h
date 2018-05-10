@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,9 +41,9 @@
 
 #pragma once
 
-#include <QVariantMap>
-
+#include <QtAppManCommon/global.h>
 #include <QtAppManCommon/exception.h>
+#include <QVariantMap>
 
 struct archive;
 QT_FORWARD_DECLARE_CLASS(QFileInfo)
@@ -55,7 +55,7 @@ class PackageUtilities
 {
 public:
     static void addFileMetadataToDigest(const QString &entryFilePath, const QFileInfo &fi, QCryptographicHash &digest);
-    static void addImportantHeaderDataToDigest(const QVariantMap &header, QCryptographicHash &digest) throw (Exception);
+    static void addImportantHeaderDataToDigest(const QVariantMap &header, QCryptographicHash &digest) Q_DECL_NOEXCEPT_EXPR(false);
 
     // key == field name, value == type to choose correct hashing algorithm
     static QVariantMap importantHeaderData;

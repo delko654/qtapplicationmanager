@@ -1,5 +1,5 @@
-include($QT_INSTALL_DOCS/global/qt-html-templates-offline.qdocconf)
-include(config/applicationmanager-project.qdocconf)
+include($QT_INSTALL_DOCS/global/qt-module-defaults-offline.qdocconf)
+include(applicationmanager-project.qdocconf)
 
 HTML.footer = \
     "        </div>\n" \
@@ -9,7 +9,7 @@ HTML.footer = \
     "</div>\n" \
     "<div class=\"footer\">\n" \
     "   <p>\n" \
-    "   <acronym title=\"Copyright\">&copy;</acronym> 2016 Pelagicore AG.\n" \
+    "   <acronym title=\"Copyright\">&copy;</acronym> 2018 Pelagicore AG.\n" \
     "   Documentation contributions included herein are the copyrights of\n" \
     "   their respective owners.<br>" \
     "   The documentation provided herein is licensed under the terms of the" \

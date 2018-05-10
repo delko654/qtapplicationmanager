@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -34,15 +34,18 @@
 #include "applicationmanager.h"
 #include "application.h"
 #include "qtyaml.h"
-#include "utilities.h"
-#include "packager.h"
+#include "exception.h"
+#include "packagingjob.h"
 #include "applicationinstaller.h"
 #include "qmlinprocessruntime.h"
 #include "runtimefactory.h"
+#include "utilities.h"
 
 #include "../error-checking.h"
 
 QT_USE_NAMESPACE_AM
+
+static int spyTimeout = 5000; // shorthand for specifying QSignalSpy timeouts
 
 class tst_PackagerTool : public QObject
 {
@@ -61,23 +64,29 @@ private:
         return QDir(m_workDir.path()).absoluteFilePath(QLatin1String(file));
     }
 
-    bool createInfoYaml(TemporaryDir &tmp, const QString &changeField = QString(), const QVariant &toValue = QVariant());
-    bool createIconPng(TemporaryDir &tmp);
-    bool createCode(TemporaryDir &tmp);
+    bool createInfoYaml(QTemporaryDir &tmp, const QString &changeField = QString(), const QVariant &toValue = QVariant());
+    bool createIconPng(QTemporaryDir &tmp);
+    bool createCode(QTemporaryDir &tmp);
 
 
-    ApplicationInstaller *m_ai = 0;
-    TemporaryDir m_workDir;
+    ApplicationInstaller *m_ai = nullptr;
+    QTemporaryDir m_workDir;
 
     QString m_devPassword;
     QString m_devCertificate;
     QString m_storePassword;
     QString m_storeCertificate;
     QStringList m_caFiles;
+    QString m_hardwareId;
 };
 
 void tst_PackagerTool::initTestCase()
 {
+    if (!QDir(qL1S(AM_TESTDATA_DIR "/packages")).exists())
+        QSKIP("No test packages available in the data/ directory");
+
+    spyTimeout *= timeoutFactor();
+
     QVERIFY(m_workDir.isValid());
 
     QVERIFY(QDir::root().mkpath(pathTo("manifests")));
@@ -85,18 +94,20 @@ void tst_PackagerTool::initTestCase()
     QVERIFY(QDir::root().mkpath(pathTo("internal-0")));
     QVERIFY(QDir::root().mkpath(pathTo("documents-0")));
 
+    m_hardwareId = "foobar";
+
     QVariantMap internalLocation {
         { "id", "internal-0" },
         { "installationPath", pathTo("internal-0") },
         { "documentPath", pathTo("documents-0") },
     };
-    QVector<InstallationLocation> locations = InstallationLocation::parseInstallationLocations({ internalLocation });
+    QVector<InstallationLocation> locations = InstallationLocation::parseInstallationLocations({ internalLocation }, m_hardwareId);
 
     QString errorString;
     m_ai = ApplicationInstaller::createInstance(locations, pathTo("manifests"), pathTo("image-mounts"), &errorString);
     QVERIFY2(m_ai, qPrintable(errorString));
 
-    QVERIFY2(ApplicationManager::createInstance(0, true, &errorString), qPrintable(errorString));
+    QVERIFY2(ApplicationManager::createInstance(nullptr, true, &errorString), qPrintable(errorString));
 
 
     // crypto stuff - we need to load the root CA and developer CA certificates
@@ -124,57 +135,61 @@ void tst_PackagerTool::initTestCase()
 
 
 // exceptions are nice -- just not for unit testing :)
-static bool packagerCheck(Packager *p, QString &errorString)
+static bool packagerCheck(PackagingJob *p, QString &errorString)
 {
+    bool result = false;
     try {
         p->execute();
         errorString.clear();
-        return (p->resultCode() == 0);
+        result = (p->resultCode() == 0);
+        if (!result)
+            errorString = p->output();
     } catch (const Exception &e) { \
         errorString = e.errorString();
-        return false;
     }
+    delete p;
+    return result;
 }
 
 void tst_PackagerTool::test()
 {
-    TemporaryDir tmp;
+    QTemporaryDir tmp;
     QString errorString;
 
     // no valid destination
-    QVERIFY(!packagerCheck(Packager::create(pathTo("test.appkg"), pathTo("test.appkg")), errorString));
+    QVERIFY(!packagerCheck(PackagingJob::create(pathTo("test.appkg"), pathTo("test.appkg")), errorString));
     QVERIFY2(errorString.contains(qL1S("not a directory")), qPrintable(errorString));
 
     // no valid info.yaml
-    QVERIFY(!packagerCheck(Packager::create(pathTo("test.appkg"), tmp.path()), errorString));
+    QVERIFY(!packagerCheck(PackagingJob::create(pathTo("test.appkg"), tmp.path()), errorString));
     QVERIFY2(errorString.contains(qL1S("could not open file for reading")), qPrintable(errorString));
 
     // add an info.yaml file
     createInfoYaml(tmp);
 
     // no icon
-    QVERIFY(!packagerCheck(Packager::create(pathTo("test.appkg"), tmp.path()), errorString));
+    QVERIFY(!packagerCheck(PackagingJob::create(pathTo("test.appkg"), tmp.path()), errorString));
     QVERIFY2(errorString.contains(qL1S("missing the 'icon.png' file")), qPrintable(errorString));
 
     // add an icon
     createIconPng(tmp);
 
     // no valid code
-    QVERIFY(!packagerCheck(Packager::create(pathTo("test.appkg"), tmp.path()), errorString));
+    QVERIFY(!packagerCheck(PackagingJob::create(pathTo("test.appkg"), tmp.path()), errorString));
     QVERIFY2(errorString.contains(qL1S("missing the file referenced by the 'code' field")), qPrintable(errorString));
 
     // add a code file
     createCode(tmp);
 
     // invalid destination
-    QVERIFY(!packagerCheck(Packager::create(tmp.path(), tmp.path()), errorString));
+    QVERIFY(!packagerCheck(PackagingJob::create(tmp.path(), tmp.path()), errorString));
     QVERIFY2(errorString.contains(qL1S("could not create package file")), qPrintable(errorString));
 
     // now everything is correct - try again
-    QVERIFY2(packagerCheck(Packager::create(pathTo("test.appkg"), tmp.path()), errorString), qPrintable(errorString));
+    QVERIFY2(packagerCheck(PackagingJob::create(pathTo("test.appkg"), tmp.path()), errorString), qPrintable(errorString));
 
     // invalid source package
-    QVERIFY(!packagerCheck(Packager::developerSign(
+    QVERIFY(!packagerCheck(PackagingJob::developerSign(
                                pathTo("no-such-file"),
                                pathTo("test.dev-signed.appkg"),
                                m_devCertificate,
@@ -182,7 +197,7 @@ void tst_PackagerTool::test()
     QVERIFY2(errorString.contains(qL1S("does not exist")), qPrintable(errorString));
 
     // invalid destination package
-    QVERIFY(!packagerCheck(Packager::developerSign(
+    QVERIFY(!packagerCheck(PackagingJob::developerSign(
                                pathTo("test.appkg"),
                                pathTo("."),
                                m_devCertificate,
@@ -191,7 +206,7 @@ void tst_PackagerTool::test()
 
 
     // invalid dev key
-    QVERIFY(!packagerCheck(Packager::developerSign(
+    QVERIFY(!packagerCheck(PackagingJob::developerSign(
                                pathTo("test.appkg"),
                                pathTo("test.dev-signed.appkg"),
                                m_devCertificate,
@@ -199,37 +214,37 @@ void tst_PackagerTool::test()
     QVERIFY2(errorString.contains(qL1S("could not create signature")), qPrintable(errorString));
 
     // invalid store key
-    QVERIFY(!packagerCheck(Packager::storeSign(
+    QVERIFY(!packagerCheck(PackagingJob::storeSign(
                                pathTo("test.appkg"),
                                pathTo("test.store-signed.appkg"),
                                m_storeCertificate,
                                qSL("wrong-password"),
-                               hardwareId()), errorString));
+                               m_hardwareId), errorString));
     QVERIFY2(errorString.contains(qL1S("could not create signature")), qPrintable(errorString));
 
     // sign
-    QVERIFY2(packagerCheck(Packager::developerSign(
+    QVERIFY2(packagerCheck(PackagingJob::developerSign(
                                pathTo("test.appkg"),
                                pathTo("test.dev-signed.appkg"),
                                m_devCertificate,
                                m_devPassword), errorString), qPrintable(errorString));
 
-    QVERIFY2(packagerCheck(Packager::storeSign(
+    QVERIFY2(packagerCheck(PackagingJob::storeSign(
                                pathTo("test.appkg"),
                                pathTo("test.store-signed.appkg"),
                                m_storeCertificate,
                                m_storePassword,
-                               hardwareId()), errorString), qPrintable(errorString));
+                               m_hardwareId), errorString), qPrintable(errorString));
 
     // verify
-    QVERIFY2(packagerCheck(Packager::developerVerify(
+    QVERIFY2(packagerCheck(PackagingJob::developerVerify(
                                pathTo("test.dev-signed.appkg"),
                                m_caFiles), errorString), qPrintable(errorString));
 
-    QVERIFY2(packagerCheck(Packager::storeVerify(
+    QVERIFY2(packagerCheck(PackagingJob::storeVerify(
                                pathTo("test.store-signed.appkg"),
                                m_caFiles,
-                               hardwareId()), errorString), qPrintable(errorString));
+                               m_hardwareId), errorString), qPrintable(errorString));
 
     // now that we have it, see if the package actually installs correctly
 
@@ -240,7 +255,7 @@ void tst_PackagerTool::test()
     QString taskId = m_ai->startPackageInstallation(qSL("internal-0"), QUrl::fromLocalFile(pathTo("test.dev-signed.appkg")));
     m_ai->acknowledgePackageInstallation(taskId);
 
-    QVERIFY(finishedSpy.wait());
+    QVERIFY(finishedSpy.wait(2 * spyTimeout));
     QCOMPARE(finishedSpy.first()[0].toString(), taskId);
 
     m_ai->setDevelopmentMode(false);
@@ -266,7 +281,7 @@ void tst_PackagerTool::brokenMetadata_data()
 
     QTest::newRow("missing-name")       << "name"    << QVariant("") << "~.*the 'name' field must not be empty";
     QTest::newRow("missing-runtime")    << "runtime" << QVariant("") << "~.*the 'runtimeName' field must not be empty";
-    QTest::newRow("missing-identifier") << "id"      << QVariant("") << "~.*the identifier \\(\\) is not a valid reverse-DNS name: the minimum amount of parts \\(subdomains\\) is 3 \\(found 1\\)";
+    QTest::newRow("missing-identifier") << "id"      << QVariant("") << "~.*the identifier \\(\\) is not a valid application-id: must not be empty";
     QTest::newRow("missing-code")       << "code"    << QVariant("") << "~.*the 'code' field must not be empty";
 }
 
@@ -276,7 +291,7 @@ void tst_PackagerTool::brokenMetadata()
     QFETCH(QVariant, yamlValue);
     QFETCH(QString, errorString);
 
-    TemporaryDir tmp;
+    QTemporaryDir tmp;
 
     createCode(tmp);
     createIconPng(tmp);
@@ -285,11 +300,11 @@ void tst_PackagerTool::brokenMetadata()
     // check if packaging actually fails with the expected error
 
     QString error;
-    QVERIFY(!packagerCheck(Packager::create(pathTo("test.appkg"), tmp.path()), error));
+    QVERIFY(!packagerCheck(PackagingJob::create(pathTo("test.appkg"), tmp.path()), error));
     AM_CHECK_ERRORSTRING(error, errorString);
 }
 
-bool tst_PackagerTool::createInfoYaml(TemporaryDir &tmp, const QString &changeField, const QVariant &toValue)
+bool tst_PackagerTool::createInfoYaml(QTemporaryDir &tmp, const QString &changeField, const QVariant &toValue)
 {
     QByteArray yaml =
             "formatVersion: 1\n"
@@ -312,13 +327,13 @@ bool tst_PackagerTool::createInfoYaml(TemporaryDir &tmp, const QString &changeFi
     return infoYaml.open(QFile::WriteOnly) && infoYaml.write(yaml) == yaml.size();
 }
 
-bool tst_PackagerTool::createIconPng(TemporaryDir &tmp)
+bool tst_PackagerTool::createIconPng(QTemporaryDir &tmp)
 {
     QFile iconPng(QDir(tmp.path()).absoluteFilePath(qSL("icon.png")));
     return iconPng.open(QFile::WriteOnly) && iconPng.write("\x89PNG") == 4;
 }
 
-bool tst_PackagerTool::createCode(TemporaryDir &tmp)
+bool tst_PackagerTool::createCode(QTemporaryDir &tmp)
 {
     QFile code(QDir(tmp.path()).absoluteFilePath(qSL("test.qml")));
     return code.open(QFile::WriteOnly) && code.write("// test") == 7LL;

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,10 +41,9 @@
 
 #pragma once
 
+#include <QtAppManCommon/global.h>
 #include <QList>
 #include <QString>
-
-#include <QtAppManCommon/exception.h>
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -63,8 +62,10 @@ public:
     QString errorString() const;
     QString name() const;
 
-    QVector<const Application *> read() throw (Exception);
-    void write(const QVector<const Application *> &apps) throw (Exception);
+    QVector<const Application *> read() Q_DECL_NOEXCEPT_EXPR(false);
+    void write(const QVector<const Application *> &apps) Q_DECL_NOEXCEPT_EXPR(false);
+
+    void invalidate();
 
 private:
     ApplicationDatabasePrivate *d;

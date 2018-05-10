@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,8 +41,8 @@
 
 #include <QQmlEngine>
 #include <QQmlExpression>
-#include <QTimer>
 
+#include "logging.h"
 #include "qmlinprocessapplicationinterface.h"
 #include "qmlinprocessruntime.h"
 #include "application.h"
@@ -72,16 +72,53 @@ QString QmlInProcessApplicationInterface::applicationId() const
     return QString();
 }
 
-QVariantMap QmlInProcessApplicationInterface::additionalConfiguration() const
+QVariantMap QmlInProcessApplicationInterface::name() const
+{
+    QVariantMap names;
+    if (m_runtime && m_runtime->application()) {
+        const QMap<QString, QString> &sm = m_runtime->application()->names();
+        for (auto it = sm.cbegin(); it != sm.cend(); ++it)
+            names.insert(it.key(), it.value());
+    }
+    return names;
+}
+
+QUrl QmlInProcessApplicationInterface::icon() const
+{
+    if (m_runtime && m_runtime->application())
+        return m_runtime->application()->iconUrl();
+    return QUrl();
+}
+
+QString QmlInProcessApplicationInterface::version() const
+{
+    if (m_runtime && m_runtime->application())
+        return m_runtime->application()->version();
+    return QString();
+}
+
+QVariantMap QmlInProcessApplicationInterface::systemProperties() const
 {
     if (m_runtime)
-        return m_runtime->additionalConfiguration();
+        return m_runtime->systemProperties();
     return QVariantMap();
 }
 
-void QmlInProcessApplicationInterface::acknowledgeQuit() const
+QVariantMap QmlInProcessApplicationInterface::applicationProperties() const
 {
-    // Nothing to do
+    if (m_runtime && m_runtime->application()) {
+        return m_runtime->application()->allAppProperties();
+    }
+    return QVariantMap();
+}
+
+void QmlInProcessApplicationInterface::acknowledgeQuit()
+{
+    emit quitAcknowledged();
+}
+
+void QmlInProcessApplicationInterface::finishedInitialization()
+{
 }
 
 Notification *QmlInProcessApplicationInterface::createNotification()
@@ -129,7 +166,7 @@ void QmlInProcessNotification::initialize()
     connect(nm, &NotificationManager::ActionInvoked,
             nm, [](uint notificationId, const QString &actionId) {
         qDebug("Notification action triggered signal: %u %s", notificationId, qPrintable(actionId));
-        foreach (const QPointer<QmlInProcessNotification> &n, s_allNotifications) {
+        for (const QPointer<QmlInProcessNotification> &n : s_allNotifications) {
             if (n->notificationId() == notificationId) {
                 n->libnotifyActionInvoked(actionId);
                 break;
@@ -142,7 +179,7 @@ void QmlInProcessNotification::initialize()
         qDebug("Notification was closed signal: %u", notificationId);
         // quick fix: in case apps have been closed items are null (see AUTOSUITE-14)
         s_allNotifications.removeAll(nullptr);
-        foreach (const QPointer<QmlInProcessNotification> &n, s_allNotifications) {
+        for (const QPointer<QmlInProcessNotification> &n : s_allNotifications) {
             if (n->notificationId() == notificationId) {
                 n->libnotifyNotificationClosed(reason);
                 s_allNotifications.removeAll(n);
@@ -237,36 +274,35 @@ void QmlInProcessApplicationInterfaceExtension::componentComplete()
     m_complete = true;
 
     if (m_name.isEmpty()) {
-        qCWarning(LogQmlIpc) << "ApplicationInterfaceExension.name is not set.";
+        qCWarning(LogQmlIpc) << "ApplicationInterfaceExtension.name is not set.";
         return;
     }
 
-    auto resolveObject = [this]() -> void {
-        if (m_object)
-            return;
+    connect(ApplicationIPCManager::instance(), &ApplicationIPCManager::interfaceCreated,
+            this, &QmlInProcessApplicationInterfaceExtension::resolveObject);
+}
 
-        const auto ifaces = ApplicationIPCManager::instance()->interfaces();
-        for (ApplicationIPCInterface *iface : ifaces) {
-            if ((iface->interfaceName() == m_name)) {
-                m_object = iface->serviceObject();
-                emit objectChanged();
-                emit readyChanged();
-                break;
-            }
+void QmlInProcessApplicationInterfaceExtension::resolveObject()
+{
+    const auto ifaces = ApplicationIPCManager::instance()->interfaces();
+    for (ApplicationIPCInterface *iface : ifaces) {
+        if ((iface->interfaceName() == m_name)) {
+            m_object = iface->serviceObject();
+            emit objectChanged();
+            emit readyChanged();
+            break;
         }
-    };
-
-    resolveObject();
-    if (!m_object)
-        QTimer::singleShot(0, this, resolveObject);
+    }
 }
 
 void QmlInProcessApplicationInterfaceExtension::setName(const QString &name)
 {
-    if (!m_complete)
+    if (!m_complete) {
         m_name = name;
-    else
+        resolveObject();
+    } else {
         qWarning("Cannot change the name property of an ApplicationInterfaceExtension after creation.");
+    }
 }
 
 QT_END_NAMESPACE_AM

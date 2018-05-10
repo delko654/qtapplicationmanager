@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -42,19 +42,20 @@
 #include <QFile>
 #include <QDataStream>
 #include <QTemporaryFile>
+#include <QScopedPointer>
 
 #include "application.h"
 #include "applicationdatabase.h"
+#include "exception.h"
 
 QT_BEGIN_NAMESPACE_AM
 
 class ApplicationDatabasePrivate
 {
 public:
-    QFile *file;
+    QFile *file = nullptr;
 
     ApplicationDatabasePrivate()
-        : file(0)
     { }
     ~ApplicationDatabasePrivate()
     { delete file; }
@@ -99,42 +100,57 @@ QString ApplicationDatabase::name() const
     return d->file->fileName();
 }
 
-QVector<const Application *> ApplicationDatabase::read() throw (Exception)
+QVector<const Application *> ApplicationDatabase::read() Q_DECL_NOEXCEPT_EXPR(false)
 {
+    if (!d->file || !d->file->isOpen() || !d->file->isReadable())
+        throw Exception("application database %1 is not opened for reading").arg(d->file ? d->file->fileName() : qSL("<null>"));
+
     QVector<const Application *> apps;
 
     if (d->file->seek(0)) {
         QDataStream ds(d->file);
 
         forever {
-            Application *app = Application::readFromDataStream(ds, apps);
+            QScopedPointer<Application> app(Application::readFromDataStream(ds, apps));
 
             if (ds.status() != QDataStream::Ok) {
                 if (ds.status() != QDataStream::ReadPastEnd) {
                     qDeleteAll(apps);
-                    throw Exception(Error::System, "could not read from application database %1").arg(d->file->fileName());
+                    throw Exception("could not read from application database %1").arg(d->file->fileName());
                 }
                 break;
             }
-            apps << app;
+            apps << app.take();
         }
     }
 
     return apps;
 }
 
-void ApplicationDatabase::write(const QVector<const Application *> &apps) throw (Exception)
+void ApplicationDatabase::write(const QVector<const Application *> &apps) Q_DECL_NOEXCEPT_EXPR(false)
 {
+    if (!d->file || !d->file->isOpen() || !d->file->isWritable())
+        throw Exception("application database %1 is not opened for writing").arg(d->file ? d->file->fileName() : qSL("<null>"));
     if (!d->file->seek(0))
         throw Exception(*d->file, "could not not seek to position 0 in the application database");
     if (!d->file->resize(0))
         throw Exception(*d->file, "could not truncate the application database");
 
     QDataStream ds(d->file);
-    foreach (const Application *app, apps)
+    for (const Application *app : apps)
         app->writeToDataStream(ds, apps);
     if (ds.status() != QDataStream::Ok)
         throw Exception(*d->file, "could not write to application database");
+}
+
+void ApplicationDatabase::invalidate()
+{
+    if (d->file) {
+        if (d->file->isOpen())
+            d->file->close();
+        d->file->remove();
+        d->file = nullptr;
+    }
 }
 
 QT_END_NAMESPACE_AM

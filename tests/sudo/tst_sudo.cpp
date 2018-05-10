@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -27,6 +27,7 @@
 ****************************************************************************/
 
 #include <QtTest>
+#include <QTemporaryDir>
 #include <qplatformdefs.h>
 
 #if !defined(Q_OS_LINUX)
@@ -41,6 +42,9 @@
 
 #include "../sudo-cleanup.h"
 
+QT_USE_NAMESPACE_AM
+
+static int processTimeout = 3000;
 
 static bool startedSudoServer = false;
 static QString sudoServerError;
@@ -106,8 +110,8 @@ public:
 
             QProcess p;
             p.start(LOSETUP, { "--show", "-f", argument });
-            SUB_QVERIFY2(p.waitForStarted(3000), qPrintable(p.errorString()));
-            SUB_QVERIFY2(p.waitForFinished(3000), qPrintable(p.errorString()));
+            SUB_QVERIFY2(p.waitForStarted(processTimeout), qPrintable(p.errorString()));
+            SUB_QVERIFY2(p.waitForFinished(processTimeout), qPrintable(p.errorString()));
             SUB_QVERIFY2(p.exitCode() == 0, qPrintable(p.readAllStandardError()));
             m_loopbackDevice = p.readAllStandardOutput().trimmed();
         }
@@ -134,8 +138,8 @@ public:
 
             for (int tries = 2; tries; --tries) {
                 p.start(LOSETUP, { "-d", m_loopbackDevice });
-                QVERIFY2(p.waitForStarted(3000), qPrintable(p.errorString()));
-                QVERIFY2(p.waitForFinished(3000), qPrintable(p.errorString()));
+                QVERIFY2(p.waitForStarted(processTimeout), qPrintable(p.errorString()));
+                QVERIFY2(p.waitForFinished(processTimeout), qPrintable(p.errorString()));
                 if (p.exitCode() == 0)
                     return;
 
@@ -175,8 +179,8 @@ public:
 
             QProcess p;
             p.start(MOUNT, { "-t", "ext2", device, mountPoint});
-            SUB_QVERIFY2(p.waitForStarted(3000), qPrintable(p.errorString()));
-            SUB_QVERIFY2(p.waitForFinished(3000), qPrintable(p.errorString()));
+            SUB_QVERIFY2(p.waitForStarted(processTimeout), qPrintable(p.errorString()));
+            SUB_QVERIFY2(p.waitForFinished(processTimeout), qPrintable(p.errorString()));
             SUB_QVERIFY2(p.exitCode() == 0, qPrintable(p.readAllStandardError()));
         }
         return m_mounted = true;
@@ -195,8 +199,8 @@ public:
             QProcess p;
             for (int tries = 2; tries; --tries) {
                 p.start(UMOUNT, { "-lf", m_mountPoint });
-                QVERIFY2(p.waitForStarted(3000), qPrintable(p.errorString()));
-                QVERIFY2(p.waitForFinished(3000), qPrintable(p.errorString()));
+                QVERIFY2(p.waitForStarted(processTimeout), qPrintable(p.errorString()));
+                QVERIFY2(p.waitForFinished(processTimeout), qPrintable(p.errorString()));
                 if (p.exitCode() == 0)
                     return;
 
@@ -222,7 +226,7 @@ class tst_Sudo : public QObject
     Q_OBJECT
 
 public:
-    tst_Sudo(QObject *parent = 0);
+    tst_Sudo(QObject *parent = nullptr);
     ~tst_Sudo();
 
 private slots:
@@ -244,8 +248,8 @@ private:
         return QDir(m_workDir.path()).absoluteFilePath(file);
     }
 
-    SudoClient *m_root = 0;
-    TemporaryDir m_workDir;
+    SudoClient *m_root = nullptr;
+    QTemporaryDir m_workDir;
 };
 
 tst_Sudo::tst_Sudo(QObject *parent)
@@ -257,21 +261,26 @@ tst_Sudo::~tst_Sudo()
     if (m_workDir.isValid()) {
         ScopedRootPrivileges sudo;
 
-        detachLoopbacksAndUnmount(0, m_workDir.path());
-        recursiveOperation(m_workDir.path(), SafeRemove());
+        detachLoopbacksAndUnmount(nullptr, m_workDir.path());
+        recursiveOperation(m_workDir.path(), safeRemove);
     }
 }
 
 void tst_Sudo::initTestCase()
 {
+    processTimeout *= timeoutFactor();
+
+    QVERIFY2(startedSudoServer, qPrintable(sudoServerError));
+    m_root = SudoClient::instance();
+    QVERIFY(m_root);
+    if (SudoClient::instance()->isFallbackImplementation())
+        QSKIP("Not running with root privileges - neither directly, or SUID-root, or sudo");
+
     QVERIFY(QFile::exists(LOSETUP));
     QVERIFY(QFile::exists(MOUNT));
     QVERIFY(QFile::exists(UMOUNT));
     QVERIFY(QFile::exists(BLKID));
 
-    QVERIFY2(startedSudoServer, qPrintable(sudoServerError));
-    m_root = SudoClient::instance();
-    QVERIFY(m_root);
 
     QVERIFY(m_workDir.isValid());
 
@@ -450,7 +459,7 @@ void tst_Sudo::checkMountPoints()
         QStringList mounts = allMounts.values(mountPoint);
 
         QCOMPARE(mounts.count(), mountPointList[i].size());
-        foreach (int index, mountPointList[i])
+        for (int index : qAsConst(mountPointList[i]))
             QVERIFY(mounts.contains(slm[index].loopbackDevice()));
     }
 }
@@ -478,15 +487,15 @@ void tst_Sudo::image()
 
         QProcess p;
         p.start(BLKID, { "-s", "TYPE", "-o", "value", slm.loopbackDevice() });
-        QVERIFY2(p.waitForStarted(3000), qPrintable(p.errorString()));
-        QVERIFY2(p.waitForFinished(3000), qPrintable(p.errorString()));
+        QVERIFY2(p.waitForStarted(processTimeout), qPrintable(p.errorString()));
+        QVERIFY2(p.waitForFinished(processTimeout), qPrintable(p.errorString()));
         QVERIFY(p.exitCode() == 0);
         QCOMPARE(p.readAllStandardOutput().trimmed(), QByteArray("ext2"));
     }
     QVERIFY(QFile::remove(imageFile));
 }
 
-static tst_Sudo *tstSudo = 0;
+static tst_Sudo *tstSudo = nullptr;
 
 int main(int argc, char **argv)
 {

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -60,6 +60,7 @@
 #include "error.h"
 #include "installationreport.h"
 #include "utilities.h"
+#include "application.h"
 #include "qtyaml.h"
 
 // these are not defined on all platforms
@@ -110,7 +111,7 @@ bool PackageExtractor::extract()
         d->m_loop.exec();
 
         delete d->m_reply;
-        d->m_reply = 0;
+        d->m_reply = nullptr;
     }
     return !wasCanceled() && !hasFailed();
 }
@@ -219,12 +220,12 @@ qint64 PackageExtractorPrivate::readTar(struct archive *ar, const void **archive
 
 void PackageExtractorPrivate::extract()
 {
-    struct archive *ar = 0;
+    struct archive *ar = nullptr;
 
     try {
         ar = archive_read_new();
         if (!ar)
-            throw Exception(Error::System, "[libarchive] could not create a new archive object");
+            throw Exception("[libarchive] could not create a new archive object");
         if (archive_read_support_format_tar(ar) != ARCHIVE_OK)
             throw ArchiveException(ar, "could not enable TAR support");
 // disabled for now -- see libarchive.pro
@@ -252,7 +253,7 @@ void PackageExtractorPrivate::extract()
 
         // Iterate over all entries in the archive
         for (bool finished = false; !finished; ) {
-            archive_entry *entry = 0;
+            archive_entry *entry = nullptr;
             QFile f;
 
             // Try to read the next entry from the archive
@@ -271,7 +272,8 @@ void PackageExtractorPrivate::extract()
 
             __LA_MODE_T entryMode = archive_entry_mode(entry);
             PackageEntryType packageEntryType;
-            QString entryPath = QString::fromWCharArray(archive_entry_pathname_w(entry));
+            QString entryPath = QString::fromWCharArray(archive_entry_pathname_w(entry))
+                    .normalized(QString::NormalizationForm_C);
 
             switch (entryMode & S_IFMT) {
             case S_IFREG:
@@ -307,7 +309,8 @@ void PackageExtractorPrivate::extract()
                 if (!entryPath.endsWith(qL1C('/')))
                     throw Exception(Error::Package, "invalid archive entry '%1': directory name is missing '/' at the end").arg(entryPath);
                 entryPath.chop(1);
-                // no break;
+                Q_FALLTHROUGH();
+
             case PackageEntry_File: {
                 // get the directory, where the new entry will be created
                 QDir entryDir(QString(m_destinationPath + entryPath).section(qL1C('/'), 0, -2));
@@ -403,9 +406,11 @@ void PackageExtractorPrivate::extract()
             case PackageEntry_Header:
                 processMetaData(header, digest, true /*header*/);
                 break;
+
             case PackageEntry_File:
                 f.close();
-                // no break
+                Q_FALLTHROUGH();
+
             case PackageEntry_Dir: {
                 // Just to be on the safe side, we also add the file's meta-data to the digest
                 PackageUtilities::addFileMetadataToDigest(entryPath, QFileInfo(m_destinationPath + entryPath), digest);
@@ -441,7 +446,8 @@ void PackageExtractorPrivate::extract()
     m_loop.quit();
 }
 
-void PackageExtractorPrivate::processMetaData(const QByteArray &metadata, QCryptographicHash &digest, bool isHeader) throw(Exception)
+void PackageExtractorPrivate::processMetaData(const QByteArray &metadata, QCryptographicHash &digest,
+                                              bool isHeader) Q_DECL_NOEXCEPT_EXPR(false)
 {
     QtYaml::ParseError error;
     QVector<QVariant> docs = QtYaml::variantDocumentsFromYaml(metadata, &error);
@@ -450,10 +456,11 @@ void PackageExtractorPrivate::processMetaData(const QByteArray &metadata, QCrypt
         throw Exception(Error::Package, "metadata is not a valid YAML document: %1 (line: %2, column %3)")
             .arg(error.errorString()).arg(error.line).arg(error.column);
 
-    if ((docs.size() < 2)
-        || (docs.first().toMap().value(qSL("formatType")).toString() != qL1S(isHeader ? "am-package-header" : "am-package-footer"))
-        || (docs.first().toMap().value(qSL("formatVersion")).toInt(0) != 1))
-        throw Exception(Error::Package, "metadata has an invalid format specification");
+    try {
+        checkYamlFormat(docs, -2 /*at least 2 docs*/, { isHeader ? "am-package-header" : "am-package-footer" }, 1);
+    } catch (const Exception &e) {
+        throw Exception(Error::Package, "metadata has an invalid format specification: %1").arg(e.errorString());
+    }
 
     QVariantMap map = docs.at(1).toMap();
 
@@ -461,7 +468,7 @@ void PackageExtractorPrivate::processMetaData(const QByteArray &metadata, QCrypt
         QString applicationId = map.value(qSL("applicationId")).toString();
         quint64 diskSpaceUsed = map.value(qSL("diskSpaceUsed")).toULongLong();
 
-        if (applicationId.isNull() || !isValidDnsName(applicationId))
+        if (applicationId.isNull() || !Application::isValidApplicationId(applicationId))
             throw Exception(Error::Package, "metadata has an invalid applicationId field (%1)").arg(applicationId);
         m_report.setApplicationId(applicationId);
 

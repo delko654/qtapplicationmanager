@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -44,19 +44,15 @@
 #include "applicationipcinterface_p.h"
 #include "qml-utilities.h"
 #include "global.h"
+#include "logging.h"
 
-
-/*!
-    \class ApplicationIPCManager
-    \internal
-*/
 
 /*!
     \qmltype ApplicationIPCManager
     \inqmlmodule QtApplicationManager
     \brief The ApplicationIPCManager singleton.
 
-    This singleton type is the central manager for app-to-system-ui IPC interfaces within the application-manager.
+    This singleton type is the central manager for app-to-System-UI IPC interfaces within the application-manager.
 
     It only exports a single function towards the QML System-UI: registerInterface().
 
@@ -66,7 +62,7 @@
 
 QT_BEGIN_NAMESPACE_AM
 
-ApplicationIPCManager *ApplicationIPCManager::s_instance = 0;
+ApplicationIPCManager *ApplicationIPCManager::s_instance = nullptr;
 
 ApplicationIPCManager::~ApplicationIPCManager()
 { }
@@ -182,8 +178,8 @@ ApplicationIPCManager::ApplicationIPCManager(QObject *parent)
     \row
         \li \c capabilities
         \li list<string>
-        \li A list of applications capabilities (see info.yaml). Any application that has on of these
-            capabilities is allowed to use this interface.
+        \li A list of applications capabilities (see info.yaml). Any application that has one of
+            these capabilities is allowed to use this interface.
     \endtable
 
     All of the filter fields have to match, but only fields that are actually set are taken into
@@ -226,7 +222,7 @@ bool ApplicationIPCManager::registerInterface(QT_PREPEND_NAMESPACE_AM(Applicatio
         qCWarning(LogQmlIpc) << "Application IPC interface name" << name << "is not a valid D-Bus interface name";
         return false;
     }
-    foreach (const auto &ext, m_interfaces) {
+    for (const auto &ext : qAsConst(m_interfaces)) {
         if (ext->interfaceName() == name) {
             qCWarning(LogQmlIpc) << "Application IPC interface name" << name << "was already registered";
             return false;
@@ -249,6 +245,7 @@ bool ApplicationIPCManager::registerInterface(QT_PREPEND_NAMESPACE_AM(Applicatio
 
     interface->m_ipcProxy = new IpcProxyObject(interface->serviceObject(), QString(), createPathFromName(name), name, filter);
     m_interfaces.append(interface);
+    emit interfaceCreated();
     return true;
 }
 

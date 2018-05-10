@@ -1,3 +1,4 @@
+TEMPLATE = lib
 TARGET = QtAppManCrypto
 MODULE = appman_crypto
 
@@ -27,11 +28,9 @@ win32:!force-libcrypto {
 } else:osx:!force-libcrypto {
     SOURCES += signature_osx.cpp
 
-    LIBS += -framework Security
+    LIBS += -framework CoreFoundation -framework Security
     QT *= core-private
 } else {
-    include($$SOURCE_DIR/3rdparty/libcrypto.pri)
-
     SOURCES += \
         libcryptofunction.cpp \
         signature_openssl.cpp \

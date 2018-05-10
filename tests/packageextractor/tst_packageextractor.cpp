@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -28,6 +28,7 @@
 
 #include <QtTest>
 #include <QtNetwork>
+#include <QTemporaryDir>
 #include <qplatformdefs.h>
 
 #if defined(Q_OS_UNIX)
@@ -39,7 +40,7 @@
 #include "global.h"
 #include "packageextractor.h"
 #include "installationreport.h"
-#include "utilities.h"
+#include "package.h"
 
 #include "../error-checking.h"
 
@@ -66,7 +67,7 @@ private slots:
 
 private:
     QString m_taest;
-    QScopedPointer<TemporaryDir> m_extractDir;
+    QScopedPointer<QTemporaryDir> m_extractDir;
 };
 
 tst_PackageExtractor::tst_PackageExtractor()
@@ -75,12 +76,15 @@ tst_PackageExtractor::tst_PackageExtractor()
 
 void tst_PackageExtractor::initTestCase()
 {
-    QVERIFY(checkCorrectLocale());
+    if (!QDir(qL1S(AM_TESTDATA_DIR "/packages")).exists())
+        QSKIP("No test packages available in the data/ directory");
+
+    QVERIFY(Package::checkCorrectLocale());
 }
 
 void tst_PackageExtractor::init()
 {
-    m_extractDir.reset(new TemporaryDir());
+    m_extractDir.reset(new QTemporaryDir());
     QVERIFY(m_extractDir->isValid());
 }
 
@@ -133,7 +137,7 @@ void tst_PackageExtractor::extractAndVerify_data()
                                 {  m_taest, 17 } };
 
     QTest::newRow("invalid-url")    << "packages/no-such-file.appkg"
-                                    << false << "~Error opening .*: No such file or directory"
+                                    << false << "~Error opening .*: (No such file or directory|The system cannot find the file specified\\.)"
                                     << noEntries << noContent << noSizes;
     QTest::newRow("invalid-format") << "packages/test-invalid-format.appkg"
                                     << false << "~.* could not open archive: Unrecognized archive format"
@@ -228,7 +232,7 @@ void tst_PackageExtractor::cancelExtraction()
     }
 }
 
-class FifoSource : public QThread
+class FifoSource : public QThread // clazy:exclude=missing-qobject-macro
 {
 public:
     FifoSource(const QString &file)
@@ -295,7 +299,7 @@ void tst_PackageExtractor::extractFromFifo()
 
 int main(int argc, char *argv[])
 {
-    ensureCorrectLocale();
+    Package::ensureCorrectLocale();
     QCoreApplication app(argc, argv);
     app.setAttribute(Qt::AA_Use96Dpi, true);
     tst_PackageExtractor tc;

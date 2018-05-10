@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -44,13 +44,14 @@
 #include <QtAppManCommon/global.h>
 
 QT_FORWARD_DECLARE_CLASS(QQmlEngine)
+QT_FORWARD_DECLARE_CLASS(QStringList)
 
 QT_BEGIN_NAMESPACE_AM
 
 class TestRunner
 {
 public:
-    static void initialize(char *name, const QStringList &positionalArguments);
+    static void initialize(const QStringList &testRunnerArguments);
     static int exec(QQmlEngine *engine);
 };
 

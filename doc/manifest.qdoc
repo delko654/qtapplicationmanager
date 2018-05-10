@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the documentation of the Pelagicore Application Manager.
@@ -31,7 +31,7 @@
 \keyword info.yaml metadata manifest format
 \title Manifest Definition
 
-\chapter Overview
+\section1 Overview
 
 The package manifest (or metadata) file is a YAML (version 1.1) file named \c info.yaml, consisting
 of exactly two YAML documents: the file-type header and the actual application manifest.
@@ -48,7 +48,7 @@ allow to start the same program using a different icon, name and commandline arg
 have to be in the same folder as the application's main \c info.yaml file and need to be named \c
 info-<descriptive name>.yaml. See \l{Alias Manifests}{below} for a description of these alias manifests.
 
-\chapter Basic Manifest
+\section1 Basic Manifest
 
 This is an example of a full-featured \c info.yaml file. It also shows that you can mix and match
 classic YAML and JSON style in YAML 1.1 documents:
@@ -112,14 +112,22 @@ The meaning of the fields within the \c info.yaml actual manifest data (second Y
 \row
     \li \c id
     \li string
-    \li An unique reverse-DNS id. This id has to comply with RFC 1035/1123, consist of at least 3
-        parts (e.g. \c{tld.company.app}), and not exceed 150 characters in length. \e {(Required)}
+    \li The unique id of an application represented as a string. This can be used to look up
+        information about the application in the ApplicationManager model.
+        Due to its use in the file-system, only a subset of the printable ASCII characters is
+        allowed though: \c{0-9}, \c{a-z}, \c{A-Z} as well as any of \c{!#$%&'`^~_+-=.,;()[]{}}. The
+        maximum length of this id is 150 characters.
+        If you are building a larger system with 3rd-party applications, it is good practice to
+        use reverse-DNS notation for the application ids to help keep an overview in the long
+        run. The helper function ApplicationInstaller::validateDnsName can help you with
+        enforcing such a policy from the System-UI side.
 \row
     \li \c icon
     \li string
-    \li The filesystem path to icon, relative to the \c info.yaml file. \e {(Required)}
+    \li The filesystem path to the icon, relative to the \c info.yaml file. \e {(Required)}
 \row
     \li \c name
+    \target application-name-map
     \li object
     \li An object containing language (\c string) to display name (\c string) mapppings. The
         language identifiers need to adhere to the standard POSIX locale definition. Please see the
@@ -134,7 +142,8 @@ The meaning of the fields within the \c info.yaml actual manifest data (second Y
     \li \c categories
     \li array<string>
     \li The list of category names the application should be associated with. This is mainly for
-        the automated app-store upload and currently work in progress.
+        the automated app-store uploads as well as displaying the application within a fixed set
+        of categories in the System-UI.
 \row
     \li \c runtime
     \li string
@@ -156,15 +165,39 @@ The meaning of the fields within the \c info.yaml actual manifest data (second Y
 
         See below for a list of those parameters.
 \row
+    \li \c environmentVariables
+    \li object
+    \li A simple string-to-string map, describing the environment variables that should be set when
+        spawning the runtime process. You can remove a variable from the default environment by
+        giving it a null value.
+
+        Please note, that this is intended to be a feature mostly for development and demos: you
+        will have the following limitations/side-effects:
+        \list
+        \li these variables are completely ignored, if you are running the application-manager
+            with security checks enabled.
+        \li setting these will disable the use of the quick-launch mechanism for this application.
+        \li of course it is also dependent on the actual runtime of the application: in case of
+            \c qml-in-process, environment variables cannot be supported at all.
+        \endlist
+\row
     \li \c documentUrl
     \li string
-    \li An optional default document that is used, if the application is started without specifying
-        a document (see ApplicationManager::startApplication).
+    \li An optional default document URL that is used, if the application is started without
+        specifying a document URL (see ApplicationManager::startApplication).
 \row
     \li \c preload
     \li bool
     \li Try to start the application immediately after boot, but keep it in the background. By
         default, applications are not preloaded.
+\row
+    \li \c supportsApplicationInterface
+    \li bool
+    \li If set to \c true the application must implement the \l ApplicationInterface API.
+        In this case the ApplicationManager will wait until the application is connected to the
+        ApplicationInterface on the P2P D-Bus until it marks it as 'running'. For runtimes that
+        support quick launching (like the \c qml runtime) this is not required as it defaults to
+        \c true. Otherwise the default is \c false.
 \row
     \li \c importance
     \li real
@@ -175,21 +208,48 @@ The meaning of the fields within the \c info.yaml actual manifest data (second Y
     \li string
     \li Specifies if and why the application needs to be kept running in the background - can be
         one of: \c auto, \c never, \c voip, \c audio or \c location.
-        By default, the background mode is \c auto, which means it is up to the applicaton-manager
-        to decide.
+        By default, the background mode is \c auto.
+        This is just a hint for the System-UI - the application-manager itself will not enforce this
+        policy.
 \row
     \li \c mimeTypes
+    \target mimeTypes field
     \li array<string>
-    \li An optional array of MIME types the application feels responsible for.
+    \li An optional array of MIME types the application can handle. The application-manager supports
+        the classic file name or content to MIME type matching, as well as URL scheme matching:
+        please see ApplicationManager::openUrl for more information.
 \row
     \li \c capabilities
     \li array<string>
     \li An optional, platform specific list of special access rights for the application - these
-        capabilities can later be queried and verified by the middleware via the application manager.
+        capabilities can later be queried and verified by the middleware via the application-manager.
 \row
     \li \c version
     \li string
     \li The version of the application in string form.
+\row
+    \li \c applicationProperties
+    \li object
+    \li Exports user-defined properties (key/value pairs) to the application and the System-UI. The
+        actual properties must be listed under the \c private and \c protected access control
+        tag (other properties will be ignored). The properties are exposed as
+        ApplicationManager::application()::applicationProperties to the System-UI and as the
+        ApplicationInterface::applicationProperties to the QML application:
+        \list
+        \li The application has access to private and protected properties. Private keys will
+            overwrite identical protected ones.
+        \li The System-UI has access to protected properties only.
+        \endlist
+        The properties will just be converted to QVariantMaps, but the application-manager will not
+        interpret them in any way.
+\row
+    \li \c opengl
+    \li object
+    \li Gives you the possibility to specify the required OpenGL version and/or profile. See
+        \l{OpenGL Specification} {the main configuration} for more information on this subject.
+        Please note that specifying an OpenGL configuration that is different from the default
+        OpenGL configuration in the main application-manager configuration will disable the use of
+        the quick-launch mechanism for this application.
 \endtable
 
 
@@ -211,7 +271,7 @@ These \c runtimeParameters are currently defined by both the \c qml and \c qml-i
         as setting \c QML2_IMPORT_PATH for a program started from the command line.
 \endtable
 
-\chapter Alias Manifests
+\section1 Alias Manifests
 
 Here is an example of an alias manifest (\c{info-am.yaml}) for the \c info.yaml file in the chapter
 \l{Basic Manifest}{above}. This way, you could have one single tuner application \c radio.qml running
@@ -234,7 +294,7 @@ name:
   en: "AM Radio"
   de: "Langwellenrundfunk"
 
-documentUrl: "am"
+documentUrl: "x-radio://am"
 
 \endcode
 
@@ -265,9 +325,9 @@ The meaning of the fields within the alias manifest data (second YAML document) 
 \row
     \li \c aliasId
     \li string
-    \li The unique reverse-DNS id of the base application (see \l{Basic Manifest}), followed by the
-        \c{@} sign and an unique tag for this alias. This tag is only allowed to contain the
-        characters \c{[a-z0-9-]}. \e {(Required)}
+    \li The unique id of the base application (see \l{Basic Manifest}), followed by the
+        \c{@} sign and an unique tag for this alias. This tag has the same character restrictions
+        as the main application id. \e {(Required)}
 \row
     \li \c icon
     \li string

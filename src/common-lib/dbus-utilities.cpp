@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -68,9 +68,21 @@ QVariant convertFromJSVariant(const QVariant &variant)
     } else if (type == QMetaType::QVariant) {
         // got a matryoshka variant
         return convertFromJSVariant(variant.value<QVariant>());
-    } else if (type == QMetaType::UnknownType){
-        // we cannot send QVariant::Invalid via DBus, so we abuse BYTE(0) for this purpose
+    } else if ((type == QMetaType::UnknownType) || (type == QMetaType::Nullptr)) {
+        // we cannot send QVariant::Invalid and null values via DBus, so we abuse BYTE(0) for this purpose
         return QVariant::fromValue<uchar>(0);
+    } else if (type == QMetaType::QVariantList) {
+        QVariantList outList;
+        QVariantList inList = variant.toList();
+        for (auto it = inList.cbegin(); it != inList.cend(); ++it)
+            outList.append(convertFromJSVariant(*it));
+        return outList;
+    } else if (type == QMetaType::QVariantMap) {
+        QVariantMap outMap;
+        QVariantMap inMap = variant.toMap();
+        for (auto it = inMap.cbegin(); it != inMap.cend(); ++it)
+            outMap.insert(it.key(), convertFromJSVariant(it.value()));
+        return outMap;
     } else {
         return variant;
     }
@@ -134,9 +146,13 @@ QVariant convertFromDBusVariant(const QVariant &variant)
 void registerDBusTypes()
 {
 #if defined(QT_DBUS_LIB)
-    qDBusRegisterMetaType<QUrl>();
-    qDBusRegisterMetaType<QMap<QString, QDBusUnixFileDescriptor>>();
-    qDBusRegisterMetaType<QT_PREPEND_NAMESPACE_AM(UnixFdMap)>();
+    static bool once = false;
+    if (!once) {
+        qDBusRegisterMetaType<QUrl>();
+        qDBusRegisterMetaType<QMap<QString, QDBusUnixFileDescriptor>>();
+        qDBusRegisterMetaType<QT_PREPEND_NAMESPACE_AM(UnixFdMap)>();
+        once = true;
+    }
 #endif
 }
 

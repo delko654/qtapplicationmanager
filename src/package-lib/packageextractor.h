@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -61,7 +61,7 @@ class PackageExtractor : public QObject
     Q_OBJECT
 
 public:
-    PackageExtractor(const QUrl &downloadUrl, const QDir &destinationDir, QObject *parent = 0);
+    PackageExtractor(const QUrl &downloadUrl, const QDir &destinationDir, QObject *parent = nullptr);
 
     QDir destinationDirectory() const;
     void setDestinationDirectory(const QDir &destinationDir);

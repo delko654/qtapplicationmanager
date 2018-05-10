@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,7 +41,8 @@ static void detachLoopbacksAndUnmount(SudoClient *root, const QString &baseDir)
     }
 
     QMap<QString, QString> mounts = mountedDirectories();
-    foreach (const QString &mountPoint, mounts.keys()) {
+    for (auto it = mounts.cbegin(); it != mounts.cend(); ++it) {
+        const QString &mountPoint = it.key();
         if (mountPoint.startsWith(baseDir)) {
             bool success;
             if (root) {
@@ -61,8 +62,8 @@ static void detachLoopbacksAndUnmount(SudoClient *root, const QString &baseDir)
     // we cannot directly open /dev/loop* devices here, since that would
     // require root privileges. The information about the backing-files
     // is however also available via sysfs for non-root users.
-    QStringList loopbacks = QDir("/sys/block").entryList({ "loop*" }, QDir::Dirs | QDir::NoDotAndDotDot);
-    foreach (const QString &loopback, loopbacks) {
+    const QStringList loopbacks = QDir("/sys/block").entryList({ "loop*" }, QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &loopback : loopbacks) {
         QFile backing(QString::fromLatin1("/sys/block/%1/loop/backing_file").arg(loopback));
 
         if (backing.open(QFile::ReadOnly)) {

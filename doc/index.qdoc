@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the documentation of the Pelagicore Application Manager.
@@ -27,40 +27,60 @@
 
 /*!
 
-\page index.html
+\page qtapplicationmanager-index.html
 \keyword Qt Application Manager Reference Documentation
 \indexpage
 \title Qt Application Manager
 
-\chapter Overview
+\section1 Overview
 
 The application-manager binary (\c appman) is a headless daemon by itself. A suitable QML file
 needs to be supplied on the command-line or via a config file at startup, which will act as a
 compositing window manager using the APIs that are exported from the C++ side.
 
-\chapter Important topics
+Please read the \l{The Qt Application Manager}{Introduction to the Qt Application Manager} for a
+high-level overview of the package.
+
+\section1 Important topics
 \list
     \li \l{Installation}
     \li \l{Configuration}
+    \li \l{Troubleshooting}
     \omit
     \li \l{How to write a System-UI}
     \endomit
     \li \l{Writing Applications}
     \li \l{The Application Installer}
-    \li \l{Debugging}
+    \li \l{Logging and Debugging}
+    \li \l{Containers}
+    \li \l{Single- vs. Multi-Process Mode}
 \endlist
 
-\chapter Tools
+\section1 Tools
 \annotatedlist qtappman-tools
 
-\chapter Reference
+\section1 Reference
 \list
     \li \l{Manifest Definition}{Manifest Definition (info.yaml)}
     \li \l{System-UI QML Types}
     \li \l{Applications QML Types}
 \endlist
 
-\chapter Examples
+\section1 Examples
 \annotatedlist applicationmanager-examples
+
+\section1 Licenses and Attributions
+
+Qt ApplicationManager is available under commercial Qt Automotive Suite licenses.
+In addition, it is available under the \l{GNU Lesser General Public License, version 3}, or
+See \l{Qt Licensing} for further details.
+
+Executables on Windows potentially link against \l{The qtmain Library}. This library is available
+under commercial licenses, and in addition under the \l{BSD 3-clause "New" or "Revised" License}.
+
+Furthermore Qt ApplicationManager potentially contains third party modules under following
+permissive licenses:
+
+\generatelist{groupsbymodule attributions-applicationmanager}
 
 */

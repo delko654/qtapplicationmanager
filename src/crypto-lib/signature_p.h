@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,8 +41,7 @@
 
 #pragma once
 
-#include "signature.h"
-#include <QtAppManCommon/exception.h>
+#include <QtAppManCrypto/signature.h>
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -53,9 +52,9 @@ public:
     QString error;
 
     QByteArray create(const QByteArray &signingCertificatePkcs12,
-                      const QByteArray &signingCertificatePassword) throw(Exception);
+                      const QByteArray &signingCertificatePassword) Q_DECL_NOEXCEPT_EXPR(false);
     bool verify(const QByteArray &signaturePkcs7,
-                const QList<QByteArray> &chainOfTrust) throw(Exception);
+                const QList<QByteArray> &chainOfTrust) Q_DECL_NOEXCEPT_EXPR(false);
 };
 
 QT_END_NAMESPACE_AM

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -44,17 +44,17 @@
 #include <QVector>
 #include <QPointer>
 
-#include <QtAppManManager/applicationinterface.h>
+#include <QtAppManApplication/applicationinterface.h>
 #include <QtAppManNotification/notification.h>
 
 QT_BEGIN_NAMESPACE_AM
 
 class QmlInProcessRuntime;
 
-class QmlInProcessNotification : public Notification
+class QmlInProcessNotification : public Notification // clazy:exclude=missing-qobject-macro
 {
 public:
-    QmlInProcessNotification(QObject *parent = 0, ConstructionMode mode = Declarative);
+    QmlInProcessNotification(QObject *parent = nullptr, ConstructionMode mode = Declarative);
 
     void componentComplete() override;
 
@@ -79,14 +79,22 @@ class QmlInProcessApplicationInterface : public ApplicationInterface
     Q_OBJECT
 
 public:
-    explicit QmlInProcessApplicationInterface(QmlInProcessRuntime *runtime = 0);
+    explicit QmlInProcessApplicationInterface(QmlInProcessRuntime *runtime = nullptr);
 
     QString applicationId() const override;
-    QVariantMap additionalConfiguration() const override;
+    QVariantMap name() const override;
+    QUrl icon() const override;
+    QString version() const override;
+    QVariantMap systemProperties() const override;
+    QVariantMap applicationProperties() const override;
 
     Q_INVOKABLE QT_PREPEND_NAMESPACE_AM(Notification *) createNotification();
-    Q_INVOKABLE void acknowledgeQuit() const;
+    Q_INVOKABLE void acknowledgeQuit();
 
+    void finishedInitialization() override;
+
+signals:
+    void quitAcknowledged();
 private:
     QmlInProcessRuntime *m_runtime;
     friend class QmlInProcessRuntime;
@@ -111,6 +119,7 @@ public:
 protected:
     void classBegin() override;
     void componentComplete() override;
+    void resolveObject();
 
 public slots:
     void setName(const QString &name);

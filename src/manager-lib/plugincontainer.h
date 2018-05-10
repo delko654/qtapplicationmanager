@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -55,8 +55,9 @@ public:
     static QString defaultIdentifier();
     bool supportsQuickLaunch() const override;
 
-    AbstractContainer *create() override;
-    AbstractContainer *create(const ContainerDebugWrapper &debugWrapper) override;
+    AbstractContainer *create(const Application *app, const QVector<int> &stdioRedirections,
+                              const QMap<QString, QString> &debugWrapperEnvironment,
+                              const QStringList &debugWrapperCommand) override;
 
     void setConfiguration(const QVariantMap &configuration) override;
 
@@ -75,8 +76,6 @@ public:
 
     qint64 processId() const override;
     QProcess::ProcessState state() const override;
-    void setWorkingDirectory(const QString &dir) override;
-    void setProcessEnvironment(const QProcessEnvironment &environment) override;
 
 public slots:
     void kill() override;
@@ -104,10 +103,10 @@ public:
     QString mapContainerPathToHost(const QString &containerPath) const override;
     QString mapHostPathToContainer(const QString &hostPath) const override;
 
-    AbstractContainerProcess *start(const QStringList &arguments, const QProcessEnvironment &env) override;
+    AbstractContainerProcess *start(const QStringList &arguments, const QMap<QString, QString> &env) override;
 
 protected:
-    explicit PluginContainer(ContainerInterface *containerInterface, AbstractContainerManager *manager);
+    explicit PluginContainer(AbstractContainerManager *manager, const Application *app, ContainerInterface *containerInterface);
     ContainerInterface *m_interface;
     PluginContainerProcess *m_process;
     bool m_startCalled = false;

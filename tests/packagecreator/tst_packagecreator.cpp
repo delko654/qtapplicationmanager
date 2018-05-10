@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -30,12 +30,15 @@
 
 #include "global.h"
 #include "installationreport.h"
-#include "utilities.h"
+#include "package.h"
 #include "packagecreator.h"
+#include "utilities.h"
 
 #include "../error-checking.h"
 
 QT_USE_NAMESPACE_AM
+
+static int processTimeout = 3000;
 
 class tst_PackageCreator : public QObject
 {
@@ -51,8 +54,12 @@ private slots:
     void createAndVerify();
 
 private:
+    QString escapeFilename(const QString &name);
+
+private:
     QDir m_baseDir;
     bool m_tarAvailable = false;
+    bool m_isCygwin = false;
 };
 
 tst_PackageCreator::tst_PackageCreator()
@@ -61,14 +68,18 @@ tst_PackageCreator::tst_PackageCreator()
 
 void tst_PackageCreator::initTestCase()
 {
+    processTimeout *= timeoutFactor();
+
     // check if tar command is available at all
     QProcess tar;
     tar.start(qSL("tar"), { qSL("--version") });
-    m_tarAvailable = tar.waitForStarted(3000)
-            && tar.waitForFinished(3000)
+    m_tarAvailable = tar.waitForStarted(processTimeout)
+            && tar.waitForFinished(processTimeout)
             && (tar.exitStatus() == QProcess::NormalExit);
 
-    QVERIFY(checkCorrectLocale());
+    m_isCygwin = tar.readAllStandardOutput().contains("Cygwin");
+
+    QVERIFY(Package::checkCorrectLocale());
 }
 
 void tst_PackageCreator::createAndVerify_data()
@@ -113,9 +124,9 @@ void tst_PackageCreator::createAndVerify()
         QSKIP("No tar command found in PATH - skipping the verification part of the test!");
 
     QProcess tar;
-    tar.start(qSL("tar"), { qSL("-tzf"), output.fileName() });
-    QVERIFY2(tar.waitForStarted(3000) &&
-             tar.waitForFinished(3000) &&
+    tar.start(qSL("tar"), { qSL("-tzf"), escapeFilename(output.fileName()) });
+    QVERIFY2(tar.waitForStarted(processTimeout) &&
+             tar.waitForFinished(processTimeout) &&
              (tar.exitStatus() == QProcess::NormalExit) &&
              (tar.exitCode() == 0), qPrintable(tar.errorString()));
 
@@ -123,18 +134,20 @@ void tst_PackageCreator::createAndVerify()
     expectedContents.sort();
     expectedContents.prepend(qSL("--PACKAGE-HEADER--"));
     expectedContents.append(qSL("--PACKAGE-FOOTER--"));
-    QCOMPARE(expectedContents, QString::fromLocal8Bit(tar.readAllStandardOutput()).split(qL1C('\n'), QString::SkipEmptyParts));
+
+    QStringList actualContents = QString::fromLocal8Bit(tar.readAllStandardOutput()).split(qL1C('\n'), QString::SkipEmptyParts);
+    QCOMPARE(actualContents, expectedContents);
 
     // check the contents of the files
 
-    foreach (const QString &file, files) {
+    for (const QString &file : qAsConst(files)) {
         QFile src(m_baseDir.absoluteFilePath(file));
         QVERIFY2(src.open(QFile::ReadOnly), qPrintable(src.errorString()));
         QByteArray data = src.readAll();
 
-        tar.start(qSL("tar"), { qSL("-xzOf"), output.fileName(), file });
-        QVERIFY2(tar.waitForStarted(3000) &&
-                 tar.waitForFinished(3000) &&
+        tar.start(qSL("tar"), { qSL("-xzOf"), escapeFilename(output.fileName()), file });
+        QVERIFY2(tar.waitForStarted(processTimeout) &&
+                 tar.waitForFinished(processTimeout) &&
                  (tar.exitStatus() == QProcess::NormalExit) &&
                  (tar.exitCode() == 0), qPrintable(tar.errorString()));
 
@@ -142,9 +155,21 @@ void tst_PackageCreator::createAndVerify()
     }
 }
 
+QString tst_PackageCreator::escapeFilename(const QString &name)
+{
+    if (!m_isCygwin) {
+        return name;
+    } else {
+        QString s = QFileInfo(name).absoluteFilePath();
+        QString t = qSL("/cygdrive/");
+        t.append(s.at(0));
+        return t + s.mid(2);
+    }
+}
+
 int main(int argc, char *argv[])
 {
-    ensureCorrectLocale();
+    Package::ensureCorrectLocale();
     QCoreApplication app(argc, argv);
     app.setAttribute(Qt::AA_Use96Dpi, true);
     tst_PackageCreator tc;

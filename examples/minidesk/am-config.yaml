@@ -1,8 +1,18 @@
 formatVersion: 1
 formatType: am-configuration
 ---
+installationLocations:
+- id: "internal-0"
+  installationPath: "/tmp/minidesk/apps"
+  documentPath: "/tmp/minidesk/docs"
+  mountPoint: "/tmp"
+  isDefault: true
+
 applications:
-  builtinAppsManifestDir: "apps"
+  builtinAppsManifestDir: "${CONFIG_PWD}/apps"
+  installedAppsManifestDir: "/tmp/minidesk/manifests"
+  appImageMountDir: "/tmp/minidesk/image-mounts"
+  database: "/tmp/minidesk/apps.db"
 
 logging:
   rules:
@@ -10,12 +20,15 @@ logging:
     - "qt.*=false"
     - "am.*=false"
     - "qml*=true"
+    - "*.warning=true"
     - "*.critical=true"
 
 ui:
   fullscreen: no
-  mainQml: "system-ui/main.qml"
-  additionalConfiguration:
+  mainQml: "${CONFIG_PWD}/system-ui/main.qml"
+
+systemProperties:
+  protected:
     light: on
 
 # development setup:

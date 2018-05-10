@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -53,21 +53,36 @@ QT_BEGIN_NAMESPACE_AM
 class StartupTimer : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(quint64 timeToFirstFrame READ timeToFirstFrame NOTIFY timeToFirstFrameChanged)
+    Q_PROPERTY(quint64 systemUpTime READ systemUpTime NOTIFY systemUpTimeChanged)
 
 public:
-    // this should be the first instruction in main()
-    StartupTimer();
+    static StartupTimer *instance();
     ~StartupTimer();
 
-    void checkpoint(const char *name);
     Q_INVOKABLE void checkpoint(const QString &name);
-    Q_INVOKABLE void createReport();
+    Q_INVOKABLE void createReport(const QString &title = QString());
+
+    quint64 timeToFirstFrame() const;
+    quint64 systemUpTime() const;
+
+    void checkpoint(const char *name);
+    void checkFirstFrame();
+    void reset();
+
+signals:
+    void timeToFirstFrameChanged(quint64 timeToFirstFrame);
+    void systemUpTimeChanged(quint64 systemUpTime);
 
 private:
-    FILE *m_output = 0;
+    StartupTimer();
+    static StartupTimer *s_instance;
+
+    FILE *m_output = nullptr;
     bool m_initialized = false;
-    bool m_reportCreated = false;
     quint64 m_processCreation = 0;
+    quint64 m_timeToFirstFrame = 0;
+    quint64 m_systemUpTime = 0;
     QElapsedTimer m_timer;
     QVector<QPair<quint64, QByteArray>> m_checkpoints;
 

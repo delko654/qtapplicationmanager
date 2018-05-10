@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -548,7 +548,7 @@ QStringList Notification::libnotifyActionList() const
     QStringList actionList;
     if (isAcknowledgeable())
         actionList << qSL("default") << QString();
-    foreach (const QVariant &action, actions()) {
+    for (const QVariant &action : m_actions) {
         if (action.type() == QVariant::String) {
             actionList << action.toString() << QString();
         } else {

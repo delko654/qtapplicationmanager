@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -42,12 +42,13 @@
 #include <QCoreApplication>
 #include <QTimer>
 
+#include "logging.h"
 #include "abstractcontainer.h"
 #include "abstractruntime.h"
 #include "containerfactory.h"
 #include "runtimefactory.h"
 #include "quicklauncher.h"
-#include "systemmonitor.h"
+#include "systemreader.h"
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -65,18 +66,31 @@ QuickLauncher::QuickLauncher(QObject *parent)
 { }
 
 QuickLauncher::~QuickLauncher()
-{ }
+{
+    if (m_idleTimerId)
+        killTimer(m_idleTimerId);
+    delete m_idleCpu;
+}
 
 void QuickLauncher::initialize(int runtimesPerContainer, qreal idleLoad)
 {
     ContainerFactory *cf = ContainerFactory::instance();
     RuntimeFactory *rf = RuntimeFactory::instance();
 
-    foreach (const QString &containerId, cf->containerIds()) {
+    if (runtimesPerContainer <= 0) {
+        qCDebug(LogSystem) << "Not setting up the quick-launch pool (runtimesPerContainer is 0)";
+        return;
+    }
+
+    qCDebug(LogSystem) << "Setting up the quick-launch pool:";
+
+    const QStringList allContainerIds = cf->containerIds();
+    for (const QString &containerId : allContainerIds) {
         if (!cf->manager(containerId)->supportsQuickLaunch())
             continue;
 
-        foreach (const QString &runtimeId, rf->runtimeIds()) {
+        const QStringList allRuntimeIds = rf->runtimeIds();
+        for (const QString &runtimeId : allRuntimeIds) {
             if (rf->manager(runtimeId)->inProcess())
                 continue;
 
@@ -89,23 +103,37 @@ void QuickLauncher::initialize(int runtimesPerContainer, qreal idleLoad)
 
             m_quickLaunchPool << entry;
 
-            qCDebug(LogSystem) << "Created quick-launch slot for" << containerId + qSL("/") + runtimeId;
+            qCDebug(LogSystem).nospace().noquote() << " * " << entry.m_containerId << " / "
+                                                   << (entry.m_runtimeId.isEmpty() ? qSL("(no runtime)") : entry.m_runtimeId)
+                                                   << " [at max: " << runtimesPerContainer << "]";
         }
     }
+
     if (idleLoad > 0) {
-        SystemMonitor::instance()->setIdleLoadAverage(idleLoad);
-        m_onlyRebuildWhenIdle = true;
-        connect(SystemMonitor::instance(), &SystemMonitor::idleChanged, this, &QuickLauncher::rebuild);
+        m_idleThreshold = idleLoad;
+        m_idleCpu = new CpuReader();
+        m_idleTimerId = startTimer(1000);
     }
     triggerRebuild();
 }
 
+void QuickLauncher::timerEvent(QTimerEvent *te)
+{
+    if (te && te->timerId() == m_idleTimerId) {
+        bool nowIdle = (m_idleCpu->readLoadValue() <= m_idleThreshold);
+        if (nowIdle != m_isIdle) {
+            m_isIdle = nowIdle;
+
+            if (m_isIdle)
+                rebuild();
+        }
+    }
+}
+
 void QuickLauncher::rebuild()
 {
-    if (m_onlyRebuildWhenIdle) {
-        if (!SystemMonitor::instance()->isIdle())
-            return;
-    }
+    if (m_shuttingDown)
+        return;
 
     int todo = 0;
     int done = 0;
@@ -116,7 +144,7 @@ void QuickLauncher::rebuild()
             if (done >= 1)
                 continue;
 
-            QScopedPointer<AbstractContainer> ac(ContainerFactory::instance()->create(entry->m_containerId));
+            QScopedPointer<AbstractContainer> ac(ContainerFactory::instance()->create(entry->m_containerId, nullptr));
             if (!ac) {
                 qCWarning(LogSystem) << "ERROR: Could not create quick-launch container with id"
                                      << entry->m_containerId;
@@ -146,10 +174,12 @@ void QuickLauncher::rebuild()
             if (runtime)
                 connect(runtime, &AbstractRuntime::destroyed, this, [this, runtime]() { removeEntry(nullptr, runtime); });
 
-            qCDebug(LogSystem) << "Added" << entry->m_containerId << "/" << entry->m_runtimeId <<
-                                  "to the quick-launch pool ->" << container << runtime;
             entry->m_containersAndRuntimes << qMakePair(container, runtime);
             ++done;
+
+            qCDebug(LogSystem).noquote() << "Added a new entry to the quick-launch pool:"
+                                         << entry->m_containerId << "/"
+                                         << (entry->m_runtimeId.isEmpty() ? qSL("(no runtime)") : entry->m_runtimeId);
         }
     }
     if (todo > done)
@@ -163,6 +193,9 @@ void QuickLauncher::triggerRebuild(int delay)
 
 void QuickLauncher::removeEntry(AbstractContainer *container, AbstractRuntime *runtime)
 {
+    int carCount = 0;
+    int carRemoved = 0;
+
     for (auto entry = m_quickLaunchPool.begin(); entry != m_quickLaunchPool.end(); ++entry) {
         for (int i = 0; i < entry->m_containersAndRuntimes.size(); ++i) {
             auto car = entry->m_containersAndRuntimes.at(i);
@@ -171,9 +204,16 @@ void QuickLauncher::removeEntry(AbstractContainer *container, AbstractRuntime *r
                 qCDebug(LogSystem) << "Removed quicklaunch entry for container/runtime" << container << runtime;
 
                 entry->m_containersAndRuntimes.removeAt(i--);
+                carRemoved++;
             }
+            carCount += entry->m_containersAndRuntimes.count();
         }
     }
+    // make sure to only emit shutDownFinished once: when the list gets empty for the first time.
+    // (removeEntry could be called again afterwards and it wouldn't actually remove anything, but
+    // without this guard, it would emit the signal multiple times)
+    if (m_shuttingDown && (carRemoved > 0) && (carCount == 0))
+        emit shutDownFinished();
 }
 
 QPair<AbstractContainer *, AbstractRuntime *> QuickLauncher::take(const QString &containerId, const QString &runtimeId)
@@ -189,7 +229,11 @@ QPair<AbstractContainer *, AbstractRuntime *> QuickLauncher::take(const QString 
                         || ((pass == 2) && (entry->m_runtimeId.isEmpty()))) {
                     if (!entry->m_containersAndRuntimes.isEmpty()) {
                         result = entry->m_containersAndRuntimes.takeFirst();
+                        result.first->disconnect(this);
+                        if (result.second)
+                            result.second->disconnect(this);
                         triggerRebuild();
+
                         pass = 2;
                         break;
                     }
@@ -201,18 +245,24 @@ QPair<AbstractContainer *, AbstractRuntime *> QuickLauncher::take(const QString 
     return result;
 }
 
-void QuickLauncher::killAll()
+void QuickLauncher::shutDown()
 {
+    m_shuttingDown = true;
+    bool waitForRemove = false;
+
     for (auto entry = m_quickLaunchPool.begin(); entry != m_quickLaunchPool.end(); ++entry) {
-        for (const auto &car : entry->m_containersAndRuntimes) {
-            if (car.second) {
-                car.second->stop(true);
-                delete car.second;
-            }
+        for (const auto &car : qAsConst(entry->m_containersAndRuntimes)) {
+            if (car.second)
+                car.second->stop();
+            else if (car.first)
+                car.first->deleteLater();
+
+            if (car.first || car.second)
+                waitForRemove = true;
         }
-        entry->m_containersAndRuntimes.clear();
     }
-    m_quickLaunchPool.clear();
+    if (!waitForRemove)
+        QTimer::singleShot(0, this, &QuickLauncher::shutDownFinished);
 }
 
 QT_END_NAMESPACE_AM

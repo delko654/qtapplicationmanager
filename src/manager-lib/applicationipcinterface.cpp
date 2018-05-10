@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -54,17 +54,38 @@
 
 #include <QDebug>
 
+#include "logging.h"
 #include "application.h"
 #include "utilities.h"
 #include "dbus-utilities.h"
 #include "applicationipcinterface.h"
 #include "applicationipcinterface_p.h"
 
+/*!
+    \qmltype ApplicationIPCInterface
+    \inqmlmodule QtApplicationManager
+    \brief The definition of an IPC interface between the ApplicationManager and applications.
+
+    Using ApplicationIPCInterface items, you can define an IPC interface between your System-UI and
+    your applications. The actual interface will be all the properties, signals and functions
+    defined within this item. It is however also possible to use this item to wrap already existing
+    QtObject or even \l QObject instances by setting the serviceObject property: this will expose
+    all properties, signals and functions of the serviceObject instead of the one's in this item.
+
+    Please see the ApplicationIPCManager::registerInterface for an in-depth explanation on how these
+    IPC interfaces are set up.
+*/
+
 QT_BEGIN_NAMESPACE_AM
 
 ApplicationIPCInterface::ApplicationIPCInterface(QObject *parent)
     : QObject(parent)
 { }
+
+ApplicationIPCInterface::~ApplicationIPCInterface()
+{
+    delete m_ipcProxy;
+}
 
 QString ApplicationIPCInterface::interfaceName() const
 {
@@ -84,7 +105,9 @@ bool ApplicationIPCInterface::isValidForApplication(const Application *app) cons
 /*!
     \qmlproperty QtObject ApplicationIPCInterface::serviceObject
 
-    This property holds the pointer to the object which is exposed on the IPC
+    This property holds the pointer to the object which is exposed on the IPC. By default this
+    will return the ApplicationIPCInterface object itself, but setting this property can be used
+    to wrap already existing objects in order to expose them as IPC interfaces to applications.
 */
 QObject *ApplicationIPCInterface::serviceObject() const
 {
@@ -234,7 +257,7 @@ IpcProxyObject::IpcProxyObject(QObject *object, const QString &serviceName, cons
         if (propName.startsWith(TYPE_ANNOTATION_PREFIX)) {
             QByteArray slotName = propName.mid(qstrlen(TYPE_ANNOTATION_PREFIX));
             bool found = false;
-            foreach (int slotIndex,  m_slots) {
+            for (int slotIndex : qAsConst(m_slots)) {
                 QMetaMethod mm = mo->method(slotIndex);
                 if (mm.name() == slotName) {
                     found = true;
@@ -318,7 +341,7 @@ QByteArray IpcProxyObject::createIntrospectionXml()
 
     const QMetaObject *mo = m_object->metaObject();
 
-    foreach (int i, m_properties) {
+    for (int i : qAsConst(m_properties)) {
         QMetaProperty mp = mo->property(i);
 
         QByteArray readWrite;
@@ -332,7 +355,7 @@ QByteArray IpcProxyObject::createIntrospectionXml()
                 + "\" access=\"" + readWrite
                 + "\" />\n";
     }
-    foreach (int i, m_signals) {
+    for (int i : qAsConst(m_signals)) {
         QMetaMethod mm = mo->method(i);
 
         xml = xml + "  <signal name=\"" + mm.name() + "\">\n";
@@ -347,7 +370,7 @@ QByteArray IpcProxyObject::createIntrospectionXml()
         }
         xml = xml + "  </signal>\n";
     }
-    foreach (int i, m_slots) {
+    for (int i : qAsConst(m_slots)) {
         QMetaMethod mm = mo->method(i);
         QList<int> types;
         if (m_slotSignatures.contains(i)) {
@@ -412,7 +435,7 @@ bool IpcProxyObject::isValidForApplication(const Application *app) const
         return false;
 
     auto matchStringLists = [](const QStringList &sl1, const QStringList &sl2) -> bool {
-        foreach (const QString &s1, sl1) {
+        for (const QString &s1 : sl1) {
             if (sl2.contains(s1))
                 return true;
         }
@@ -487,7 +510,7 @@ bool IpcProxyObject::handleMessage(const QDBusMessage &message, const QDBusConne
 
     if (interface == m_interfaceName) {
         // find in registered slots only - not in all methods
-        foreach (int mi, m_slots) {
+        for (int mi : qAsConst(m_slots)) {
             QMetaMethod mm = mo->method(mi);
             if (mm.name() == function) {
                 if (mm.parameterCount() == message.arguments().count()) {
@@ -553,7 +576,7 @@ bool IpcProxyObject::handleMessage(const QDBusMessage &message, const QDBusConne
             QByteArray name = message.arguments().at(1).toString().toLatin1();
             QVariant result;
 
-            foreach (int pi, m_properties) {
+            for (int pi : qAsConst(m_properties)) {
                 QMetaProperty mp = mo->property(pi);
                 if (mp.name() == name) {
                     result = convertFromJSVariant(mp.read(m_object));
@@ -573,7 +596,7 @@ bool IpcProxyObject::handleMessage(const QDBusMessage &message, const QDBusConne
         } else if (function == "Set") {
             QByteArray name = message.arguments().at(1).toString().toLatin1();
 
-            foreach (int pi, m_properties) {
+            for (int pi : qAsConst(m_properties)) {
                 QMetaProperty mp = mo->property(pi);
                 if (mp.name() == name) {
                     if (mp.isWritable()) {

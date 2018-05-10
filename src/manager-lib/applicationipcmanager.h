@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -44,8 +44,10 @@
 #include <QObject>
 #include <QVariantMap>
 #include <QVector>
-#include <qqml.h>
 #include <QtAppManCommon/global.h>
+
+QT_FORWARD_DECLARE_CLASS(QQmlEngine)
+QT_FORWARD_DECLARE_CLASS(QJSEngine)
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -55,6 +57,7 @@ class ApplicationIPCInterface;
 class ApplicationIPCManager : public QObject
 {
     Q_OBJECT
+    Q_CLASSINFO("AM-QmlType", "QtApplicationManager/ApplicationIPCManager 1.0")
 
 public:
     ~ApplicationIPCManager();
@@ -64,6 +67,9 @@ public:
 
     Q_INVOKABLE bool registerInterface(QT_PREPEND_NAMESPACE_AM(ApplicationIPCInterface*) interface, const QString &name, const QVariantMap &filter);
     QVector<ApplicationIPCInterface *> interfaces() const;
+
+signals:
+    void interfaceCreated();
 
 private:
     ApplicationIPCManager(QObject *parent = nullptr);

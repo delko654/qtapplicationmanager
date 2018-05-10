@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -45,42 +45,32 @@
 #include <QProcess>
 #include <QDir>
 #include <QTimer>
+#include <QUuid>
 #include <QMimeDatabase>
 #if defined(QT_GUI_LIB)
 #  include <QDesktopServices>
 #endif
+#if defined(Q_OS_UNIX)
+#  include <signal.h>
+#endif
 
 #include "global.h"
-
+#include "logging.h"
+#include "exception.h"
 #include "applicationdatabase.h"
 #include "applicationmanager.h"
+#include "applicationmodel.h"
+#include "applicationmanager_p.h"
 #include "application.h"
 #include "runtimefactory.h"
 #include "containerfactory.h"
 #include "quicklauncher.h"
 #include "abstractruntime.h"
 #include "abstractcontainer.h"
-#include "dbus-policy.h"
 #include "qml-utilities.h"
 #include "utilities.h"
 #include "qtyaml.h"
-
-#if defined(Q_OS_UNIX)
-#  include <unistd.h>
-#  include <signal.h>
-#endif
-
-#define AM_AUTHENTICATE_DBUS(RETURN_TYPE) \
-    do { \
-        if (!checkDBusPolicy(this, d->dbusPolicy, __FUNCTION__, [](qint64 pid) -> QStringList { return ApplicationManager::instance()->capabilities(ApplicationManager::instance()->identifyApplication(pid)); })) \
-            return RETURN_TYPE(); \
-    } while (false);
-
-
-/*!
-    \class ApplicationManager
-    \internal
-*/
+#include "debugwrapper.h"
 
 /*!
     \qmltype ApplicationManager
@@ -105,8 +95,8 @@
     \row
         \li \c applicationId
         \li string
-        \li The unique Id of an application, represented as a string in reverse-dns form (e.g.
-            \c com.pelagicore.foo)
+        \li The unique Id of an application, represented as a string (e.g. \c Browser or
+            \c com.pelagicore.music)
     \row
         \li \c name
         \li string
@@ -213,6 +203,15 @@
 */
 
 /*!
+    \qmlproperty bool ApplicationManager::shuttingDown
+    \readonly
+
+    This property is there to inform the System-UI, when the application-manager has entered its
+    shutdown phase. New application starts are already prevented, but the System-UI might want
+    to impose additional restrictions in this state.
+*/
+
+/*!
     \qmlproperty bool ApplicationManager::securityChecksEnabled
     \readonly
 
@@ -222,10 +221,18 @@
 */
 
 /*!
-    \qmlproperty var ApplicationManager::additionalConfiguration
+    \qmlproperty var ApplicationManager::systemProperties
     \readonly
 
-    Returns the project specific \l{additional configuration} that was set via the config file.
+    Returns the project specific \l{system properties} that were set via the config file.
+*/
+
+/*!
+    \qmlproperty var ApplicationManager::containerSelectionFunction
+
+    A JavaScript function callback that will be called whenever the application-manager needs to
+    instantiate a container for running an application. See \l {Container Selection Configuration}
+    for more information.
 */
 
 /*!
@@ -247,7 +254,9 @@
     \li ApplicationManager.NotRunning - the application has not been started yet
     \li ApplicationManager.StartingUp - the application has been started and is initializing
     \li ApplicationManager.Running - the application is running
-    \li ApplicationManager.ShuttingDown - the application has been stopped and is cleaning up
+    \li ApplicationManager.ShuttingDown - the application has been stopped and is cleaning up (in
+                                          multi-process mode this signal is only emitted if the
+                                          application terminates gracefully)
     \endlist
 
     For example this signal can be used to restart an application in multi-process mode when
@@ -264,6 +273,40 @@
         }
     }
     \endqml
+*/
+
+/*!
+    \qmlsignal ApplicationManager::applicationAdded(string id)
+
+    This signal is emitted after a new application, identified by \a id, has been installed via the
+    ApplicationInstaller. The model has already been update before this signal is sent out.
+
+    \note In addition to the normal "low-level" QAbstractListModel signals, the application-manager
+          will also emit these "high-level" signals for System-UIs that cannot work directly on the
+          ApplicationManager model: applicationAdded, applicationAboutToBeRemoved and applicationChanged.
+*/
+
+/*!
+    \qmlsignal ApplicationManager::applicationAboutToBeRemoved(string id)
+
+    This signal is emitted before an existing application, identified by \a id, is removed via the
+    ApplicationInstaller.
+
+    \note In addition to the normal "low-level" QAbstractListModel signals, the application-manager
+          will also emit these "high-level" signals for System-UIs that cannot work directly on the
+          ApplicationManager model: applicationAdded, applicationAboutToBeRemoved and applicationChanged.
+*/
+
+/*!
+    \qmlsignal ApplicationManager::applicationChanged(string id, list<string> changedRoles)
+
+    Emitted whenever one or more data roles, denoted by \a changedRoles, changed on the application
+    identified by \a id. An empty list in the \a changedRoles argument means that all roles should
+    be considered modified.
+
+    \note In addition to the normal "low-level" QAbstractListModel signals, the application-manager
+          will also emit these "high-level" signals for System-UIs that cannot work directly on the
+          ApplicationManager model: applicationAdded, applicationAboutToBeRemoved and applicationChanged.
 */
 
 enum Roles
@@ -290,36 +333,22 @@ enum Roles
     Importance,
     Preload,
     Version,
-    ApplicationItem
+    ApplicationItem,
+    LastExitCode,
+    LastExitStatus
 };
 
 QT_BEGIN_NAMESPACE_AM
 
-class ApplicationManagerPrivate
+static ApplicationManager::RunState runtimeToManagerState(AbstractRuntime::State rtState)
 {
-public:
-    bool securityChecksEnabled = true;
-    bool singleProcess;
-    QVariantMap additionalConfiguration;
-    ApplicationDatabase *database = nullptr;
-
-    QMap<QByteArray, DBusPolicy> dbusPolicy;
-
-    QVector<const Application *> apps;
-
-    QString currentLocale;
-    QHash<int, QByteArray> roleNames;
-
-    QVector<IpcProxyObject *> interfaceExtensions;
-
-    QVector<ContainerDebugWrapper> debugWrappers;
-
-    ContainerDebugWrapper parseDebugWrapperSpecification(const QString &spec);
-
-    ApplicationManagerPrivate();
-    ~ApplicationManagerPrivate();
-};
-
+    switch (rtState) {
+    case AbstractRuntime::Startup: return ApplicationManager::StartingUp;
+    case AbstractRuntime::Active: return ApplicationManager::Running;
+    case AbstractRuntime::Shutdown: return ApplicationManager::ShuttingDown;
+    default: return ApplicationManager::NotRunning;
+    }
+}
 
 ApplicationManagerPrivate::ApplicationManagerPrivate()
 {
@@ -331,7 +360,7 @@ ApplicationManagerPrivate::ApplicationManagerPrivate()
     roleNames.insert(IsRunning, "isRunning");
     roleNames.insert(IsStartingUp, "isStartingUp");
     roleNames.insert(IsShuttingDown, "isShuttingDown");
-    roleNames.insert(IsBlocked, "isLocked");
+    roleNames.insert(IsBlocked, "isBlocked");
     roleNames.insert(IsUpdating, "isUpdating");
     roleNames.insert(IsRemovable, "isRemovable");
     roleNames.insert(UpdateProgress, "updateProgress");
@@ -345,14 +374,17 @@ ApplicationManagerPrivate::ApplicationManagerPrivate()
     roleNames.insert(Preload, "preload");
     roleNames.insert(Version, "version");
     roleNames.insert(ApplicationItem, "application");
+    roleNames.insert(LastExitCode, "lastExitCode");
+    roleNames.insert(LastExitStatus, "lastExitStatus");
 }
 
 ApplicationManagerPrivate::~ApplicationManagerPrivate()
 {
     delete database;
+    qDeleteAll(apps);
 }
 
-ApplicationManager *ApplicationManager::s_instance = 0;
+ApplicationManager *ApplicationManager::s_instance = nullptr;
 
 ApplicationManager *ApplicationManager::createInstance(ApplicationDatabase *adb, bool singleProcess, QString *error)
 {
@@ -374,11 +406,12 @@ ApplicationManager *ApplicationManager::createInstance(ApplicationDatabase *adb,
     } catch (const Exception &e) {
         if (error)
             *error = e.errorString();
-        return 0;
+        return nullptr;
     }
 
     qmlRegisterSingletonType<ApplicationManager>("QtApplicationManager", 1, 0, "ApplicationManager",
                                                  &ApplicationManager::instanceForQml);
+    qmlRegisterType<ApplicationModel>("QtApplicationManager", 1, 0, "ApplicationModel");
     qmlRegisterUncreatableType<const Application>("QtApplicationManager", 1, 0, "Application",
                                                   qSL("Cannot create objects of type Application"));
     qRegisterMetaType<const Application*>("const Application*");
@@ -431,6 +464,11 @@ bool ApplicationManager::isSingleProcess() const
     return d->singleProcess;
 }
 
+bool ApplicationManager::isShuttingDown() const
+{
+    return d->shuttingDown;
+}
+
 bool ApplicationManager::securityChecksEnabled() const
 {
     return d->securityChecksEnabled;
@@ -441,121 +479,32 @@ void ApplicationManager::setSecurityChecksEnabled(bool enabled)
     d->securityChecksEnabled = enabled;
 }
 
-QVariantMap ApplicationManager::additionalConfiguration() const
+QVariantMap ApplicationManager::systemProperties() const
 {
-    return d->additionalConfiguration;
+    return d->systemProperties;
 }
 
-void ApplicationManager::setAdditionalConfiguration(const QVariantMap &map)
+void ApplicationManager::setSystemProperties(const QVariantMap &map)
 {
-    d->additionalConfiguration = map;
+    d->systemProperties = map;
 }
 
-void ApplicationManager::setDebugWrapperConfiguration(const QVariantList &debugWrappers)
+void ApplicationManager::setContainerSelectionConfiguration(const QList<QPair<QString, QString>> &containerSelectionConfig)
 {
-    // Example:
-    //    debugWrappers:
-    //    - name: gdbserver
-    //      # %program% and %arguments% are internal variables
-    //      command: [ /usr/bin/gdbserver, ':%port%', '%program%', '%arguments%' ]
-    //      parameters:  # <name>: <default value>
-    //        port: 5555
-    //      supportedRuntimes: [ native, qml ]
-    //      supportedContainers: [ process ]
-    //    - name: valgrind
-    //      command: [ /usr/bin/valgrind, '--', '%program%', '%arguments%' ]
-    //      parameters:  # <name>: <default value>
-
-    foreach (const QVariant &v, debugWrappers) {
-        const QVariantMap &map = v.toMap();
-
-        ContainerDebugWrapper dw(map);
-        if (dw.name().isEmpty() || dw.command().isEmpty())
-            continue;
-        d->debugWrappers.append(dw);
-    }
-
-    ContainerDebugWrapper internalDw({
-        { qSL("name"), qSL("--internal-redirect-only--") },
-        { qSL("command"), QStringList { qSL("%program%"), qSL("%arguments%") } },
-        { qSL("supportedRuntimes"), QStringList { qSL("native"), qSL("qml") } },
-        { qSL("supportedContainers"), QStringList { qSL("process") } }
-    });
-    d->debugWrappers.append(internalDw);
+    d->containerSelectionConfig = containerSelectionConfig;
 }
 
-ContainerDebugWrapper ApplicationManagerPrivate::parseDebugWrapperSpecification(const QString &spec)
+QJSValue ApplicationManager::containerSelectionFunction() const
 {
-    // Example:
-    //    "gdbserver"
-    //    "gdbserver: {port: 5555}"
-
-    static ContainerDebugWrapper fail;
-
-    if (spec.isEmpty())
-        return fail;
-
-    auto docs = QtYaml::variantDocumentsFromYaml(spec.toUtf8());
-    if (docs.size() != 1)
-        return fail;
-    const QVariant v = docs.at(0);
-
-    QString name;
-    QVariantMap userParams;
-
-    switch (v.type()) {
-    case QVariant::String:
-        name = v.toString();
-        break;
-    case QVariant::Map: {
-        const QVariantMap map = v.toMap();
-        name = map.firstKey();
-        userParams = map.first().toMap();
-        break;
-    }
-    default:
-        return fail;
-    }
-
-    ContainerDebugWrapper dw;
-    for (const auto &it : qAsConst(debugWrappers)) {
-        if (it.name() == name) {
-            dw = it;
-            break;
-        }
-    }
-
-    if (!dw.isValid())
-        return fail;
-
-    for (auto it = userParams.cbegin(); it != userParams.cend(); ++it) {
-        if (!dw.setParameter(it.key(), it.value()))
-            return fail;
-    }
-    return dw;
+    return d->containerSelectionFunction;
 }
 
-bool ApplicationManager::setDBusPolicy(const QVariantMap &yamlFragment)
+void ApplicationManager::setContainerSelectionFunction(const QJSValue &callback)
 {
-    static const QVector<QByteArray> functions {
-        QT_STRINGIFY(applicationIds),
-        QT_STRINGIFY(get),
-        QT_STRINGIFY(startApplication),
-        QT_STRINGIFY(debugApplication),
-        QT_STRINGIFY(stopApplication),
-        QT_STRINGIFY(openUrl),
-        QT_STRINGIFY(capabilities),
-        QT_STRINGIFY(identifyApplication),
-        QT_STRINGIFY(applicationState)
-    };
-
-    d->dbusPolicy = parseDBusPolicy(yamlFragment);
-
-    for (auto it = d->dbusPolicy.cbegin(); it != d->dbusPolicy.cend(); ++it) {
-       if (!functions.contains(it.key()))
-           return false;
+    if (callback.isCallable() && !callback.equals(d->containerSelectionFunction)) {
+        d->containerSelectionFunction = callback;
+        emit containerSelectionFunctionChanged();
     }
-    return true;
 }
 
 QVector<const Application *> ApplicationManager::applications() const
@@ -565,7 +514,7 @@ QVector<const Application *> ApplicationManager::applications() const
 
 const Application *ApplicationManager::fromId(const QString &id) const
 {
-    foreach (const Application *app, d->apps) {
+    for (const Application *app : d->apps) {
         if (app->id() == id)
             return app;
     }
@@ -574,32 +523,17 @@ const Application *ApplicationManager::fromId(const QString &id) const
 
 const Application *ApplicationManager::fromProcessId(qint64 pid) const
 {
-    if (!pid)
-        return 0;
+    // pid could be an indirect child (e.g. when started via gdbserver)
+    qint64 appmanPid = QCoreApplication::applicationPid();
 
-    foreach (const Application *app, d->apps) {
-        if (app->currentRuntime() && (app->currentRuntime()->applicationProcessId() == pid))
-            return app;
-    }
-
-    // pid is not a direct child - try indirect children (e.g. when started via gdbserver)
-    //TODO: optimize this by pre-computing a list of parent pids first (do the same in nativeruntime)
-    qint64 appmanPid = qApp->applicationPid();
-
-    foreach (const Application *app, d->apps) {
-        if (app->currentRuntime()) {
-            qint64 rtpid = app->currentRuntime()->applicationProcessId();
-            qint64 ppid = pid;
-
-            while (ppid > 1 && ppid != appmanPid) {
-                ppid = getParentPid(ppid);
-
-                if (rtpid == ppid)
-                    return app;
-            }
+    while ((pid > 1) && (pid != appmanPid)) {
+        for (const Application *app : d->apps) {
+            if (app->currentRuntime() && (app->currentRuntime()->applicationProcessId() == pid))
+                return app;
         }
+        pid = getParentPid(pid);
     }
-    return 0;
+    return nullptr;
 }
 
 const Application *ApplicationManager::fromSecurityToken(const QByteArray &securityToken) const
@@ -607,36 +541,47 @@ const Application *ApplicationManager::fromSecurityToken(const QByteArray &secur
     if (securityToken.size() != AbstractRuntime::SecurityTokenSize)
         return 0;
 
-    foreach (const Application *app, d->apps) {
+    for (const Application *app : d->apps) {
         if (app->currentRuntime() && app->currentRuntime()->securityToken() == securityToken)
             return app;
     }
     return 0;
 }
 
-const Application *ApplicationManager::schemeHandler(const QString &scheme) const
+QVector<const Application *> ApplicationManager::schemeHandlers(const QString &scheme) const
 {
-    foreach (const Application *app, d->apps) {
-        foreach (const QString &mime, app->supportedMimeTypes()) {
+    QVector<const Application *> handlers;
+
+    for (const Application *app : d->apps) {
+        if (app->isAlias())
+            continue;
+
+        const auto mimeTypes = app->supportedMimeTypes();
+        for (const QString &mime : mimeTypes) {
             int pos = mime.indexOf(QLatin1Char('/'));
 
             if ((pos > 0)
                     && (mime.left(pos) == qL1S("x-scheme-handler"))
                     && (mime.mid(pos + 1) == scheme)) {
-                return app;
+                handlers << app;
             }
         }
     }
-    return 0;
+    return handlers;
 }
 
-const Application *ApplicationManager::mimeTypeHandler(const QString &mimeType) const
+QVector<const Application *> ApplicationManager::mimeTypeHandlers(const QString &mimeType) const
 {
-    foreach (const Application *app, d->apps) {
+    QVector<const Application *> handlers;
+
+    for (const Application *app : d->apps) {
+        if (app->isAlias())
+            continue;
+
         if (app->supportedMimeTypes().contains(mimeType))
-            return app;
+            handlers << app;
     }
-    return 0;
+    return handlers;
 }
 
 void ApplicationManager::registerMimeTypes()
@@ -644,11 +589,12 @@ void ApplicationManager::registerMimeTypes()
     QVector<QString> schemes;
     schemes << qSL("file") << qSL("http") << qSL("https");
 
-    foreach (const Application *a, d->apps) {
-        if (a->isAlias())
+    for (const Application *app : qAsConst(d->apps)) {
+        if (app->isAlias())
             continue;
 
-        foreach (const QString &mime, a->supportedMimeTypes()) {
+        const auto mimeTypes = app->supportedMimeTypes();
+        for (const QString &mime : mimeTypes) {
             int pos = mime.indexOf(QLatin1Char('/'));
 
             if ((pos > 0) && (mime.left(pos) == qL1S("x-scheme-handler")))
@@ -656,50 +602,77 @@ void ApplicationManager::registerMimeTypes()
         }
     }
 #if defined(QT_GUI_LIB)
-    foreach (const QString &scheme, schemes)
+    for (const QString &scheme : qAsConst(schemes))
         QDesktopServices::setUrlHandler(scheme, this, "openUrlRelay");
 #endif
 }
 
 bool ApplicationManager::startApplication(const Application *app, const QString &documentUrl,
+                                          const QString &documentMimeType,
                                           const QString &debugWrapperSpecification,
-                                          const QVector<int> &stdRedirections)
+                                          const QVector<int> &stdioRedirections)  Q_DECL_NOEXCEPT_EXPR(false)
 {
-    if (!app) {
-        qCWarning(LogSystem) << "Cannot start an invalid application";
-        return false;
-    }
-    if (app->isLocked()) {
-        qCWarning(LogSystem) << "Application" << app->id() << "is blocked - cannot start";
-        return false;
-    }
-    AbstractRuntime *runtime = app->currentRuntime();
+    if (d->shuttingDown)
+        throw Exception("Cannot start applications during shutdown");
+    if (!app)
+        throw Exception("Cannot start an invalid application");
+    if (app->isBlocked())
+        throw Exception("Application %1 is blocked - cannot start").arg( app->id());
 
-    ContainerDebugWrapper debugWrapper;
+    AbstractRuntime *runtime = app->currentRuntime();
+    auto runtimeManager = runtime ? runtime->manager() : RuntimeFactory::instance()->manager(app->runtimeName());
+    if (!runtimeManager)
+        throw Exception("No RuntimeManager found for runtime: %1").arg(app->runtimeName());
+    bool inProcess = runtimeManager->inProcess();
+
+    // validate stdio redirections
+    if (stdioRedirections.size() > 3) {
+        throw Exception("Tried to start application %1 using an invalid standard IO redirection specification")
+                .arg(app->id());
+    }
+    bool hasStdioRedirections = !stdioRedirections.isEmpty();
+    if (hasStdioRedirections) {
+        // we have an array - check if it just consists of -1 fds
+        hasStdioRedirections = false;
+        std::for_each(stdioRedirections.cbegin(), stdioRedirections.cend(), [&hasStdioRedirections](int fd) {
+            if (fd >= 0)
+                hasStdioRedirections = true;
+        });
+    }
+
+    // validate the debug-wrapper
+    QStringList debugWrapperCommand;
+    QMap<QString, QString> debugEnvironmentVariables;
     if (!debugWrapperSpecification.isEmpty()) {
-        debugWrapper = d->parseDebugWrapperSpecification(debugWrapperSpecification);
-        if (!debugWrapper.isValid()) {
-            qCWarning(LogSystem) << "Application" << app->id() << "cannot be started by this debug wrapper specification:" << debugWrapperSpecification;
-            return false;
+        if (isSingleProcess())
+            throw Exception("Using debug-wrappers is not supported when the application-manager is running in single-process mode.");
+        if (inProcess) {
+            throw Exception("Using debug-wrappers is not supported when starting an app using an in-process runtime (%1).")
+                .arg(runtimeManager->identifier());
         }
-        debugWrapper.setStdRedirections(stdRedirections);
+
+        if (!DebugWrapper::parseSpecification(debugWrapperSpecification, debugWrapperCommand,
+                                              debugEnvironmentVariables)) {
+            throw Exception("Tried to start application %1 using an invalid debug-wrapper specification: %2")
+                    .arg(app->id(), debugWrapperSpecification);
+        }
     }
 
     if (runtime) {
         switch (runtime->state()) {
         case AbstractRuntime::Startup:
         case AbstractRuntime::Active:
-            if (debugWrapper.isValid()) {
-                qCDebug(LogSystem) << "Application" << app->id() << "is already running - cannot start with debug-wrapper" << debugWrapper.name();
-                return false;
+            if (!debugWrapperCommand.isEmpty()) {
+                throw Exception("Application %1 is already running - cannot start with debug-wrapper: %2")
+                        .arg(app->id(), debugWrapperSpecification);
             }
 
             if (!documentUrl.isNull())
-                runtime->openDocument(documentUrl);
+                runtime->openDocument(documentUrl, documentMimeType);
             else if (!app->documentUrl().isNull())
-                runtime->openDocument(app->documentUrl());
+                runtime->openDocument(app->documentUrl(), documentMimeType);
 
-            emit applicationWasActivated(app->isAlias() ? app->nonAliased()->id() : app->id(), app->id());
+            emitActivated(app);
             return true;
 
         case AbstractRuntime::Shutdown:
@@ -710,35 +683,60 @@ bool ApplicationManager::startApplication(const Application *app, const QString 
         }
     }
 
-    auto runtimeManager = RuntimeFactory::instance()->manager(app->runtimeName());
-    if (!runtimeManager) {
-        qCWarning(LogSystem) << "No RuntimeManager found for runtime:" << app->runtimeName();
-        return false;
-    }
-
-    bool inProcess = runtimeManager->inProcess();
     AbstractContainer *container = nullptr;
-    QString containerId = qSL("process"); //TODO: ask SystemUI or use config file
-    bool attachRuntime = false;
+    QString containerId;
 
-    if (debugWrapper.isValid()) {
-        if (!debugWrapper.supportsRuntime(app->runtimeName())) {
-            qCDebug(LogSystem) << "Application" << app->id() << "is using the" << app->runtimeName()
-                               << "runtime, which is not compatible with the requested debug-wrapper"
-                               << debugWrapper.name();
-            return false;
+    if (!inProcess) {
+        if (d->containerSelectionConfig.isEmpty()) {
+            containerId = qSL("process");
+        } else {
+            // check config file
+            for (const auto &it : qAsConst(d->containerSelectionConfig)) {
+                const QString &key = it.first;
+                const QString &value = it.second;
+                bool hasAsterisk = key.contains(qL1C('*'));
+
+                if ((hasAsterisk && key.length() == 1)
+                        || (!hasAsterisk && key == app->id())
+                        || QRegExp(key, Qt::CaseSensitive, QRegExp::Wildcard).exactMatch(app->id())) {
+                    containerId = value;
+                    break;
+                }
+            }
         }
-        if (!debugWrapper.supportsContainer(containerId)) {
-            qCDebug(LogSystem) << "Application" << app->id() << "is using the" << containerId
-                               << "container, which is not compatible with the requested debug-wrapper"
-                               << debugWrapper.name();
-            return false;
+
+        if (d->containerSelectionFunction.isCallable()) {
+            QJSValueList args = { QJSValue(app->id()), QJSValue(containerId) };
+            containerId = d->containerSelectionFunction.call(args).toString();
         }
+
+        if (!ContainerFactory::instance()->manager(containerId))
+            throw Exception("No ContainerManager found for container: %1").arg(containerId);
     }
+    bool attachRuntime = false;
 
     if (!runtime) {
         if (!inProcess) {
-            if (!debugWrapper.isValid()) {
+            // we cannot use the quicklaunch pool, if
+            //  (a) a debug-wrapper is being used,
+            //  (b) stdio is redirected or
+            //  (c) the app requests special environment variables or
+            //  (d) the app requests a different OpenGL config from the AM
+            const char *cannotUseQuickLaunch = nullptr;
+
+            if (!debugWrapperCommand.isEmpty())
+                cannotUseQuickLaunch = "the app is started using a debug-wrapper";
+            else if (hasStdioRedirections)
+                cannotUseQuickLaunch = "standard I/O is redirected";
+            else if (!app->environmentVariables().isEmpty())
+                cannotUseQuickLaunch = "the app requests customs environment variables";
+            else if (app->openGLConfiguration() != runtimeManager->systemOpenGLConfiguration())
+                cannotUseQuickLaunch = "the app requests a custom OpenGL configuration";
+
+            if (cannotUseQuickLaunch) {
+                qCDebug(LogSystem) << "Cannot use quick-launch for application" << app->id()
+                                   << "because" << cannotUseQuickLaunch;
+            } else {
                 // check quicklaunch pool
                 QPair<AbstractContainer *, AbstractRuntime *> quickLaunch =
                         QuickLauncher::instance()->take(containerId, app->m_runtimeName);
@@ -756,10 +754,10 @@ bool ApplicationManager::startApplication(const Application *app, const QString 
             }
 
             if (!container) {
-                if (debugWrapper.isValid())
-                    container = ContainerFactory::instance()->create(containerId, debugWrapper);
-                else
-                    container = ContainerFactory::instance()->create(containerId);
+                container = ContainerFactory::instance()->create(containerId, app, stdioRedirections,
+                                                                 debugEnvironmentVariables, debugWrapperCommand);
+            } else {
+                container->setApplication(app);
             }
             if (!container) {
                 qCCritical(LogSystem) << "ERROR: Couldn't create Container for Application (" << app->id() <<")!";
@@ -782,34 +780,64 @@ bool ApplicationManager::startApplication(const Application *app, const QString 
         return false;
     }
 
-    connect(runtime, &AbstractRuntime::stateChanged, this, [this, app]() {
-        emit applicationRunStateChanged(app->isAlias() ? app->nonAliased()->id() : app->id(),
-                                        applicationRunState(app->id()));
+    connect(runtime, &AbstractRuntime::stateChanged, this, [this, app](AbstractRuntime::State newState) {
+        QVector<const Application *> apps;
+        //Always emit the actual starting app/alias first
+        apps.append(app);
+
+        //Add the original app and all aliases
+        const Application *nonAliasedApp = app;
+        if (app->isAlias())
+            nonAliasedApp = app->nonAliased();
+
+        if (!apps.contains(nonAliasedApp))
+            apps.append(nonAliasedApp);
+
+        for (const Application *alias : qAsConst(d->apps)) {
+            if (!apps.contains(alias) && alias->isAlias() && alias->nonAliased() == nonAliasedApp)
+                apps.append(alias);
+        }
+
+        for (const Application *app : qAsConst(apps)) {
+            emit applicationRunStateChanged(app->id(), runtimeToManagerState(newState));
+            emitDataChanged(app, QVector<int> { IsRunning, IsStartingUp, IsShuttingDown });
+        }
     });
 
     connect(runtime, static_cast<void(AbstractRuntime::*)(int, QProcess::ExitStatus)>
             (&AbstractRuntime::finished), this, [app](int code, QProcess::ExitStatus status) {
-        app->m_lastExitCode = code;
+        if (code != app->m_lastExitCode) {
+            app->m_lastExitCode = code;
+            emit app->lastExitCodeChanged();
+        }
+
+        Application::ExitStatus newStatus;
         if (status == QProcess::CrashExit) {
 #if defined(Q_OS_UNIX)
-            app->m_lastExitStatus = (code == SIGTERM || code == SIGKILL) ? Application::ForcedExit
-                                                                         : Application::CrashExit;
+            newStatus = (code == SIGTERM || code == SIGKILL) ? Application::ForcedExit : Application::CrashExit;
 #else
-            app->m_lastExitStatus = Application::CrashExit;
+            newStatus = Application::CrashExit;
 #endif
         } else {
-            app->m_lastExitStatus = Application::NormalExit;
+            newStatus = Application::NormalExit;
+        }
+        if (newStatus != app->m_lastExitStatus) {
+            app->m_lastExitStatus = newStatus;
+            emit app->lastExitStatusChanged();
         }
     });
 
     if (!documentUrl.isNull())
-        runtime->openDocument(documentUrl);
+        runtime->openDocument(documentUrl, documentMimeType);
     else if (!app->documentUrl().isNull())
-        runtime->openDocument(app->documentUrl());
+        runtime->openDocument(app->documentUrl(), documentMimeType);
 
-    emit applicationWasActivated(app->isAlias() ? app->nonAliased()->id() : app->id(), app->id());
+    emitActivated(app);
 
-    qCDebug(LogSystem) << "app:" << app->id() << "; document:" << documentUrl << "; runtime: " << runtime;
+    qCDebug(LogSystem) << "Starting application" << app->id() << "in container" << containerId
+                       << "using runtime" << runtimeManager->identifier();
+    if (!documentUrl.isEmpty())
+        qCDebug(LogSystem) << "  documentUrl:" << documentUrl;
 
     if (inProcess) {
         bool ok = runtime->start();
@@ -817,8 +845,7 @@ bool ApplicationManager::startApplication(const Application *app, const QString 
             runtime->deleteLater();
         return ok;
     } else {
-        auto f = [=]() {
-            qCDebug(LogSystem) << "Container ready for app (" << app->id() <<")!";
+        auto startInContainer = [app, attachRuntime, runtime]() {
             bool successfullyStarted = attachRuntime ? runtime->attachApplicationToQuickLauncher(app)
                                                      : runtime->start();
             if (!successfullyStarted)
@@ -829,11 +856,11 @@ bool ApplicationManager::startApplication(const Application *app, const QString 
 
         if (container->isReady()) {
             // Since the container is already ready, start the app immediately
-            return f();
+            return startInContainer();
         }
         else {
             // We postpone the starting of the application to a later point in time since the container is not ready yet
-            connect(container, &AbstractContainer::ready, f);
+            connect(container, &AbstractContainer::ready, startInContainer);
             return true;       // we return true for now, since we don't know at this point in time whether the container will be able to start the application. TODO : fix
         }
     }
@@ -846,16 +873,6 @@ void ApplicationManager::stopApplication(const Application *app, bool forceKill)
     AbstractRuntime *rt = app->currentRuntime();
     if (rt)
         rt->stop(forceKill);
-}
-
-void ApplicationManager::killAll()
-{
-    for (const Application *app : qAsConst(d->apps)) {
-        AbstractRuntime *rt = app->currentRuntime();
-        if (rt)
-            rt->stop(true);
-    }
-    QuickLauncher::instance()->killAll();
 }
 
 /*!
@@ -871,9 +888,12 @@ void ApplicationManager::killAll()
 */
 bool ApplicationManager::startApplication(const QString &id, const QString &documentUrl)
 {
-    AM_AUTHENTICATE_DBUS(bool)
-
-    return startApplication(fromId(id), documentUrl);
+    try {
+        return startApplication(fromId(id), documentUrl);
+    } catch (const Exception &e) {
+        qCWarning(LogSystem) << e.what();
+        return false;
+    }
 }
 
 /*!
@@ -886,62 +906,13 @@ bool ApplicationManager::startApplication(const QString &id, const QString &docu
 
 bool ApplicationManager::debugApplication(const QString &id, const QString &debugWrapper, const QString &documentUrl)
 {
-    AM_AUTHENTICATE_DBUS(bool)
-
-    return startApplication(fromId(id), documentUrl, debugWrapper);
-}
-
-#if defined(QT_DBUS_LIB)
-bool ApplicationManager::startApplication(const QString &id, const QT_PREPEND_NAMESPACE_AM(UnixFdMap) &redirections, const QString &documentUrl)
-{
-    AM_AUTHENTICATE_DBUS(bool)
-
-    QVector<int> redirectStd = { -1, -1, -1 };
-
-#if defined(Q_OS_UNIX)
-    for (auto it = redirections.cbegin(); it != redirections.cend(); ++it) {
-        QDBusUnixFileDescriptor dfd = it.value();
-        int fd = dfd.fileDescriptor();
-
-        const QString &which = it.key();
-        if (which == qL1S("in"))
-            redirectStd[0] = dup(fd);
-        else if (which == qL1S("out"))
-            redirectStd[1] = dup(fd);
-        else if (which == qL1S("err"))
-            redirectStd[2] = dup(fd);
+    try {
+        return startApplication(fromId(id), documentUrl, QString(), debugWrapper);
+    } catch (const Exception &e) {
+        qCWarning(LogSystem) << e.what();
+        return false;
     }
-#else
-    Q_UNUSED(redirections)
-#endif
-    return startApplication(fromId(id), documentUrl, qSL("--internal-redirect-only--"), redirectStd);
 }
-
-bool ApplicationManager::debugApplication(const QString &id, const QString &debugWrapper, const QT_PREPEND_NAMESPACE_AM(UnixFdMap) &redirections, const QString &documentUrl)
-{
-    AM_AUTHENTICATE_DBUS(bool)
-
-    QVector<int> redirectStd = { -1, -1, -1 };
-
-#if defined(Q_OS_UNIX)
-    for (auto it = redirections.cbegin(); it != redirections.cend(); ++it) {
-        QDBusUnixFileDescriptor dfd = it.value();
-        int fd = dfd.fileDescriptor();
-
-        const QString &which = it.key();
-        if (which == qL1S("in"))
-            redirectStd[0] = dup(fd);
-        else if (which == qL1S("out"))
-            redirectStd[1] = dup(fd);
-        else if (which == qL1S("err"))
-            redirectStd[2] = dup(fd);
-    }
-#else
-    Q_UNUSED(redirections)
-#endif
-    return startApplication(fromId(id), documentUrl, debugWrapper, redirectStd);
-}
-#endif
 
 /*!
     \qmlmethod ApplicationManager::stopApplication(string id, bool forceKill)
@@ -953,40 +924,94 @@ bool ApplicationManager::debugApplication(const QString &id, const QString &debu
 */
 void ApplicationManager::stopApplication(const QString &id, bool forceKill)
 {
-    AM_AUTHENTICATE_DBUS(void)
-
     return stopApplication(fromId(id), forceKill);
+}
+
+/*!
+    \qmlmethod ApplicationManager::stopAllApplications(bool forceKill)
+
+    Tells the application manager to stop all running applications. The meaning of the \a forceKill
+    parameter is runtime dependent, but in general you should always try to stop an application
+    with \a forceKill set to \c false first in order to allow a clean shutdown.
+    Use \a forceKill set to \c true only as a last resort to kill hanging applications.
+*/
+void ApplicationManager::stopAllApplications(bool forceKill)
+{
+    for (const Application *app : qAsConst(d->apps)) {
+        if (!app->isAlias()) {
+            AbstractRuntime *rt = app->currentRuntime();
+            if (rt)
+                rt->stop(forceKill);
+        }
+    }
 }
 
 /*!
     \qmlmethod bool ApplicationManager::openUrl(string url)
 
-    Tries to match the supplied \a url against the internal MIME database. If a match is found,
-    the corresponding application is started via startApplication() and \a url is supplied to
-    it as a document to open.
+    Tries start an application that is capable of handling \a url. The application-manager will
+    first look at the URL's scheme:
+    \list
+    \li If it is \c{file:}, the operating system's MIME database will be consulted, which will
+        try to find a MIME type match, based on file endings or file content. In case this is
+        successful, the application-manager will use this MIME type to find all of its applications
+        that claim support for it (see the \l{mimeTypes field} in the application's manifest).
+        A music player application that can handle \c mp3 and \c wav files, could add this to its
+        manifest:
+        \badcode
+        mimeTypes: [ 'audio/mpeg', 'audio/wav' ]
+        \endcode
+    \li If it is something other than \c{file:}, the application-manager will consult its
+        internal database of applications that claim support for a matching \c{x-scheme-handler/...}
+        MIME type. In order to have your web-browser application handle \c{http:} and \c{https:}
+        URLs, you would have to have this in your application's manifest:
+        \badcode
+        mimeTypes: [ 'x-scheme-handler/http', 'x-scheme-handler/https' ]
+        \endcode
+    \endlist
 
-    Returns the result of startApplication(), or \c false if no application was registered for
-    the type and/or scheme of \a url.
+    If there is at least one possible match, it depends on the signal openUrlRequested() being
+    connected within the System-UI:
+    In case the signal is not connected, an arbitrary application from the matching set will be
+    started. Otherwise the application-manager will emit the openUrlRequested signal and
+    return \c true. It is up to the receiver of this signal to choose from one of possible
+    applications via acknowledgeOpenUrlRequest or deny the request entirely via rejectOpenUrlRequest.
+    Not calling one of these two functions will result in memory leaks.
+
+    If an application is started by one of the two mechanisms, the \a url is supplied to
+    the application as a document to open via its ApplicationInterface.
+
+    Returns \c true, if a match was found in the database, or \c false otherwise.
+
+    \sa openUrlRequested, acknowledgeOpenUrlRequest, rejectOpenUrlRequest
 */
 bool ApplicationManager::openUrl(const QString &urlStr)
 {
-    AM_AUTHENTICATE_DBUS(bool)
+    // QDesktopServices::openUrl has a special behavior when called recursively, which makes sense
+    // on the desktop, but is completely counter-productive for the AM.
+    static bool recursionGuard = false;
+    if (recursionGuard) {
+        QTimer::singleShot(0, this, [urlStr, this]() { openUrl(urlStr); });
+        return true; // this is not correct, but the best we can do in this situation
+    }
+    recursionGuard = true;
 
     QUrl url(urlStr);
-    const Application *app = 0;
+    QString mimeTypeName;
+    QVector<const Application *> apps;
+
     if (url.isValid()) {
         QString scheme = url.scheme();
         if (scheme != qL1S("file")) {
-            app = schemeHandler(scheme);
+            apps = schemeHandlers(scheme);
 
-            if (app) {
-                if (app->isAlias())
-                    app = app->nonAliased();
+            for (auto it = apps.begin(); it != apps.end(); ++it) {
+                const Application *&app = *it;
 
                 // try to find a better matching alias, if available
-                foreach (const Application *alias, d->apps) {
+                for (const Application *alias : d->apps) {
                     if (alias->isAlias() && alias->nonAliased() == app) {
-                        if (url.toString(QUrl::PrettyDecoded | QUrl::RemoveScheme) == alias->documentUrl()) {
+                        if (url.toString(QUrl::PrettyDecoded) == alias->documentUrl()) {
                             app = alias;
                             break;
                         }
@@ -995,18 +1020,102 @@ bool ApplicationManager::openUrl(const QString &urlStr)
             }
         }
 
-        if (!app) {
+        if (apps.isEmpty()) {
             QMimeDatabase mdb;
             QMimeType mt = mdb.mimeTypeForUrl(url);
+            mimeTypeName = mt.name();
 
-            app = mimeTypeHandler(mt.name());
-            if (app && app->isAlias())
-                app = app->nonAliased();
+            apps = mimeTypeHandlers(mimeTypeName);
         }
     }
-    if (app)
-        return startApplication(app, urlStr);
-    return false;
+
+    if (!apps.isEmpty()) {
+        if (!isSignalConnected(QMetaMethod::fromSignal(&ApplicationManager::openUrlRequested))) {
+            // If the System-UI does not react to the signal, then just use the first match.
+            startApplication(apps.constFirst(), urlStr, mimeTypeName);
+        } else {
+            ApplicationManagerPrivate::OpenUrlRequest req {
+                QUuid::createUuid().toString(),
+                urlStr,
+                mimeTypeName,
+                QStringList()
+            };
+            for (const auto &app : qAsConst(apps))
+                req.possibleAppIds << app->id();
+            d->openUrlRequests << req;
+
+            emit openUrlRequested(req.requestId, req.urlStr, req.mimeTypeName, req.possibleAppIds);
+        }
+    }
+
+    recursionGuard = false;
+    return !apps.isEmpty();
+}
+
+/*!
+    \qmlsignal ApplicationManager::openUrlRequested(string requestId, string url, string mimeType, list<string> possibleAppIds)
+
+    This signal is emitted when the application-manager is requested to open an URL. This can happen
+    by calling
+    \list
+    \li Qt.openUrlExternally in an application,
+    \li Qt.openUrlExternally in the System-UI,
+    \li ApplicationManager::openUrl in the System-UI or
+    \li \c io.qt.ApplicationManager.openUrl via D-Bus
+    \endlist
+    \note This signal is only emitted, if there is a receiver connected at all - see openUrl for the
+          fallback behavior.
+
+    The receiver of this signal can inspect the requested \a url an its \a mimeType. It can then
+    either call acknowledgeOpenUrlRequest to choose from one of the supplied \a possibleAppIds or
+    rejectOpenUrlRequest to ignore the request. In both cases the unique \a requestId needs to be
+    sent to identify the request.
+    Not calling one of these two functions will result in memory leaks.
+
+    \sa openUrl, acknowledgeOpenUrlRequest, rejectOpenUrlRequest
+*/
+
+/*!
+    \qmlmethod ApplicationManager::acknowledgeOpenUrlRequest(string requestId, string appId)
+
+    Tells the application-manager to go ahead with the request to open an URL, identified by \a
+    requestId. The chosen \a appId needs to be one of the \c possibleAppIds supplied to the
+    receiver of the openUrlRequested signal.
+
+    \sa openUrl, openUrlRequested
+*/
+void ApplicationManager::acknowledgeOpenUrlRequest(const QString &requestId, const QString &appId)
+{
+    for (auto it = d->openUrlRequests.begin(); it != d->openUrlRequests.end(); ++it) {
+        if (it->requestId == requestId) {
+            if (it->possibleAppIds.contains(appId)) {
+                startApplication(application(appId), it->urlStr, it->mimeTypeName);
+            } else {
+                qCWarning(LogSystem) << "acknowledgeOpenUrlRequest for" << it->urlStr << "requested app"
+                                     << appId << "which is not one of the registered possibilities:"
+                                     << it->possibleAppIds;
+            }
+            d->openUrlRequests.erase(it);
+            break;
+        }
+    }
+}
+
+/*!
+    \qmlmethod ApplicationManager::rejectOpenUrlRequest(string requestId)
+
+    Tells the application-manager to ignore the request to open an URL, identified by \a requestId.
+
+    \sa openUrl, openUrlRequested
+*/
+void ApplicationManager::rejectOpenUrlRequest(const QString &requestId)
+{
+    for (auto it = d->openUrlRequests.begin(); it != d->openUrlRequests.end(); ++it) {
+        if (it->requestId == requestId) {
+            d->openUrlRequests.erase(it);
+            break;
+        }
+    }
 }
 
 /*!
@@ -1017,14 +1126,12 @@ bool ApplicationManager::openUrl(const QString &urlStr)
 */
 QStringList ApplicationManager::capabilities(const QString &id) const
 {
-    AM_AUTHENTICATE_DBUS(QStringList)
-
     const Application *app = fromId(id);
     return app ? app->capabilities() : QStringList();
 }
 
 /*!
-    \qmlmethod string ApplicationManager::identifyApplication(int pid, string securityToken)
+    \qmlmethod string ApplicationManager::identifyApplication(int pid)
 
     Validates the process running with process-identifier \a pid as a process started by the
     application manager.
@@ -1033,18 +1140,16 @@ QStringList ApplicationManager::capabilities(const QString &id) const
 */
 QString ApplicationManager::identifyApplication(qint64 pid) const
 {
-    AM_AUTHENTICATE_DBUS(QString)
-
     const Application *app = fromProcessId(pid);
     return app ? app->id() : QString();
 }
 
-bool ApplicationManager::lockApplication(const QString &id)
+bool ApplicationManager::blockApplication(const QString &id)
 {
     const Application *app = fromId(id);
     if (!app)
         return false;
-    if (!app->lock())
+    if (!app->block())
         return false;
     emitDataChanged(app, QVector<int> { IsBlocked });
     stopApplication(app, true);
@@ -1052,12 +1157,12 @@ bool ApplicationManager::lockApplication(const QString &id)
     return true;
 }
 
-bool ApplicationManager::unlockApplication(const QString &id)
+bool ApplicationManager::unblockApplication(const QString &id)
 {
     const Application *app = fromId(id);
     if (!app)
         return false;
-    if (!app->unlock())
+    if (!app->unblock())
         return false;
     emitDataChanged(app, QVector<int> { IsBlocked });
     return true;
@@ -1065,57 +1170,52 @@ bool ApplicationManager::unlockApplication(const QString &id)
 
 bool ApplicationManager::startingApplicationInstallation(Application *installApp)
 {
-    if (!installApp || installApp->id().isEmpty())
+    // ownership of installApp is transferred to ApplicationManager
+    QScopedPointer<Application> newapp(installApp);
+
+    if (!newapp || newapp->id().isEmpty())
         return false;
-    const Application *app = fromId(installApp->id());
-    if (!RuntimeFactory::instance()->manager(installApp->runtimeName()))
+    const Application *app = fromId(newapp->id());
+    if (!RuntimeFactory::instance()->manager(newapp->runtimeName()))
         return false;
 
     if (app) { // update
-        if (!lockApplication(app->id()))
+        if (!blockApplication(app->id()))
             return false;
-        installApp->mergeInto(const_cast<Application *>(app));
+        newapp->mergeInto(const_cast<Application *>(app));
         app->m_state = Application::BeingUpdated;
+        emit app->stateChanged(app->m_state);
         app->m_progress = 0;
-        emitDataChanged(app, QVector<int> { IsUpdating });
     } else { // installation
-        installApp->setParent(this);
-        installApp->m_locked.ref();
-        installApp->m_state = Application::BeingInstalled;
-        installApp->m_progress = 0;
+        newapp->setParent(this);
+        newapp->block();
+        newapp->m_state = Application::BeingInstalled;
+        emit newapp->stateChanged(newapp->m_state);
+        newapp->m_progress = 0;
+        app = newapp.take();
         beginInsertRows(QModelIndex(), d->apps.count(), d->apps.count());
-        d->apps << installApp;
+        d->apps << app;
         endInsertRows();
-        emit applicationAdded(installApp->id());
-        try {
-            if (d->database)
-                d->database->write(d->apps);
-        } catch (const Exception &) {
-            emit applicationAboutToBeRemoved(installApp->id());
-            beginRemoveRows(QModelIndex(), d->apps.count() - 1, d->apps.count() - 1);
-            d->apps.removeLast();
-            endRemoveRows();
-            delete installApp;
-            return false;
-        }
-        emitDataChanged(app);
+        emit applicationAdded(app->id());
     }
+    emitDataChanged(app);
     return true;
 }
 
 bool ApplicationManager::startingApplicationRemoval(const QString &id)
 {
     const Application *app = fromId(id);
-    if (!app || app->m_locked.load() || (app->m_state != Application::Installed))
+    if (!app || app->isBlocked() || (app->m_state != Application::Installed))
         return false;
 
     if (app->isBuiltIn())
         return false;
 
-    if (!lockApplication(id))
+    if (!blockApplication(id))
         return false;
 
     app->m_state = Application::BeingRemoved;
+    emit app->stateChanged(app->m_state);
     app->m_progress = 0;
     emitDataChanged(app, QVector<int> { IsUpdating });
     return true;
@@ -1141,14 +1241,35 @@ bool ApplicationManager::finishedApplicationInstall(const QString &id)
         return false;
 
     case Application::BeingInstalled:
-    case Application::BeingUpdated:
+    case Application::BeingUpdated: {
+        // The Application object has been updated right at the start of the installation/update.
+        // Now's the time to update the InstallationReport that was written by the installer.
+        QFile irfile(QDir(app->manifestDir()).absoluteFilePath(qSL("installation-report.yaml")));
+        QScopedPointer<InstallationReport> ir(new InstallationReport(app->id()));
+        if (!irfile.open(QFile::ReadOnly) || !ir->deserialize(&irfile)) {
+            qCCritical(LogInstaller) << "Could not read the new installation-report for application"
+                                     << app->id() << "at" << irfile.fileName();
+            return false;
+        }
+        const_cast<Application *>(app)->setInstallationReport(ir.take());
         app->m_state = Application::Installed;
+        emit app->stateChanged(app->m_state);
         app->m_progress = 0;
-        emitDataChanged(app, QVector<int> { IsUpdating });
 
-        unlockApplication(id);
+        try {
+            if (d->database)
+                d->database->write(d->apps);
+        } catch (const Exception &e) {
+            qCCritical(LogInstaller) << "ERROR: Application" << app->id() << "was installed, but writing the "
+                                        "updated application database to disk failed:" << e.errorString();
+            d->database->invalidate(); // make sure that the next AM start will re-read the DB
+        }
+        emitDataChanged(app);
+
+        unblockApplication(id);
+        emit app->bulkChange(); // not ideal, but icon and codeDir have changed
         break;
-
+    }
     case Application::BeingRemoved: {
         int row = d->apps.indexOf(app);
         if (row >= 0) {
@@ -1162,7 +1283,9 @@ bool ApplicationManager::finishedApplicationInstall(const QString &id)
             if (d->database)
                 d->database->write(d->apps);
         } catch (const Exception &e) {
-            qCCritical(LogSystem) << "ERROR: Application was removed successfully, but we could not save the app database:" << e.what();
+            qCCritical(LogInstaller) << "ERROR: Application" << app->id() << "was removed, but writing the "
+                                        "updated application database to disk failed:" << e.errorString();
+            d->database->invalidate(); // make sure that the next AM start will re-read the DB
             return false;
         }
         break;
@@ -1196,10 +1319,11 @@ bool ApplicationManager::canceledApplicationInstall(const QString &id)
     case Application::BeingUpdated:
     case Application::BeingRemoved:
         app->m_state = Application::Installed;
+        emit app->stateChanged(app->m_state);
         app->m_progress = 0;
         emitDataChanged(app, QVector<int> { IsUpdating });
 
-        unlockApplication(id);
+        unblockApplication(id);
         break;
     }
     return true;
@@ -1207,15 +1331,54 @@ bool ApplicationManager::canceledApplicationInstall(const QString &id)
 
 void ApplicationManager::preload()
 {
-    bool forcePreload = d->database && d->database->isTemporary();
+    bool singleAppMode = d->database && d->database->isTemporary();
 
-    foreach (const Application *app, d->apps) {
-        if (forcePreload || app->isPreloaded()) {
+    for (const Application *app : qAsConst(d->apps)) {
+        if (singleAppMode || app->isPreloaded()) {
             if (!startApplication(app)) {
-                qCWarning(LogSystem) << "WARNING: unable to start preload-enabled application" << app->id();
+                if (!singleAppMode)
+                    qCWarning(LogSystem) << "WARNING: unable to start preload-enabled application" << app->id();
+                else
+                    QMetaObject::invokeMethod(qApp, "shutDown", Qt::DirectConnection, Q_ARG(int, 1));
+            } else if (singleAppMode) {
+                connect(this, &ApplicationManager::applicationRunStateChanged, [app](const QString &id, ApplicationManager::RunState runState) {
+                    if ((id == app->id()) && (runState == NotRunning)) {
+                        QMetaObject::invokeMethod(qApp, "shutDown", Qt::DirectConnection,
+                                                  Q_ARG(int, app->lastExitCode()));
+                    }
+                });
             }
         }
     }
+}
+
+void ApplicationManager::shutDown()
+{
+    d->shuttingDown = true;
+    emit shuttingDownChanged();
+
+    auto shutdownHelper = [this]() {
+        bool activeRuntime = false;
+        for (const Application *app : qAsConst(d->apps)) {
+            AbstractRuntime *rt = app->currentRuntime();
+            if (rt) {
+                activeRuntime = true;
+                break;
+            }
+        }
+        if (!activeRuntime)
+            emit shutDownFinished();
+    };
+
+    for (const Application *app : qAsConst(d->apps)) {
+        AbstractRuntime *rt = app->currentRuntime();
+        if (rt) {
+            connect(rt, &AbstractRuntime::destroyed,
+                    this, shutdownHelper);
+            rt->stop();
+        }
+    }
+    shutdownHelper();
 }
 
 void ApplicationManager::openUrlRelay(const QUrl &url)
@@ -1237,6 +1400,12 @@ void ApplicationManager::emitDataChanged(const Application *app, const QVector<i
             emit applicationChanged(app->id(), stringRoles);
         }
     }
+}
+
+void ApplicationManager::emitActivated(const Application *app)
+{
+    emit applicationWasActivated(app->isAlias() ? app->nonAliased()->id() : app->id(), app->id());
+    emit app->activated();
 }
 
 // item model part
@@ -1283,7 +1452,7 @@ QVariant ApplicationManager::data(const QModelIndex &index, int role) const
     case IsShuttingDown:
         return app->currentRuntime() ? (app->currentRuntime()->state() == AbstractRuntime::Shutdown) : false;
     case IsBlocked:
-        return app->isLocked();
+        return app->isBlocked();
     case IsUpdating:
         return app->state() != Application::Installed;
     case UpdateProgress:
@@ -1324,6 +1493,10 @@ QVariant ApplicationManager::data(const QModelIndex &index, int role) const
         return app->version();
     case ApplicationItem:
         return QVariant::fromValue(app);
+    case LastExitCode:
+        return app->lastExitCode();
+    case LastExitStatus:
+        return app->lastExitStatus();
     }
     return QVariant();
 }
@@ -1368,6 +1541,11 @@ QVariantMap ApplicationManager::get(int row) const
 
     Returns the Application object corresponding to the given \a index in the model,
     or \c null if the index is invalid.
+
+    \note The object ownership of the returned Application object stays with the application-manager.
+          If you want to store this pointer, you can use the ApplicationManager's QAbstractListModel
+          signals or the applicationAboutToBeRemoved signal to get notified if the object is about
+          to be deleted on the C++ side.
 */
 const Application *ApplicationManager::application(int index) const
 {
@@ -1383,6 +1561,11 @@ const Application *ApplicationManager::application(int index) const
 
     Returns the Application object corresponding to the given application \a id,
     or \c null if the id does not exist.
+
+    \note The object ownership of the returned Application object stays with the application-manager.
+          If you want to store this pointer, you can use the ApplicationManager's QAbstractListModel
+          signals or the applicationAboutToBeRemoved signal to get notified if the object is about
+          to be deleted on the C++ side.
 */
 const Application *ApplicationManager::application(const QString &id) const
 {
@@ -1413,8 +1596,6 @@ int ApplicationManager::indexOfApplication(const QString &id) const
 */
 QStringList ApplicationManager::applicationIds() const
 {
-    AM_AUTHENTICATE_DBUS(QStringList)
-
     QStringList ids;
     ids.reserve(d->apps.size());
     for (int i = 0; i < d->apps.size(); ++i)
@@ -1432,33 +1613,21 @@ QStringList ApplicationManager::applicationIds() const
 */
 QVariantMap ApplicationManager::get(const QString &id) const
 {
-    AM_AUTHENTICATE_DBUS(QVariantMap)
-
-    int index = indexOfApplication(id);
-    if (index >= 0) {
-        auto map = get(index);
-        map.remove(qSL("application")); // cannot marshall QObject *
-        return map;
-    }
-    return QVariantMap();
+    auto map = get(indexOfApplication(id));
+    return map;
 }
 
 ApplicationManager::RunState ApplicationManager::applicationRunState(const QString &id) const
 {
-    AM_AUTHENTICATE_DBUS(ApplicationManager::RunState)
-
     int index = indexOfApplication(id);
-    if (index < 0)
+    if (index < 0) {
+        qCWarning(LogSystem) << "invalid index:" << index;
         return NotRunning;
+    }
     const Application *app = d->apps.at(index);
     if (!app->currentRuntime())
         return NotRunning;
-    switch (app->currentRuntime()->state()) {
-    case AbstractRuntime::Startup: return StartingUp;
-    case AbstractRuntime::Active: return Running;
-    case AbstractRuntime::Shutdown: return ShuttingDown;
-    default: return NotRunning;
-    }
+    return runtimeToManagerState(app->currentRuntime()->state());
 }
 
 QT_END_NAMESPACE_AM

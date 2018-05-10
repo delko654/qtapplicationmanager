@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -50,7 +50,6 @@
 #include <QtAppManApplication/installationreport.h>
 #include <QtAppManInstaller/asynchronoustask.h>
 #include <QtAppManInstaller/scopeutilities.h>
-#include <QtAppManCommon/exception.h>
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -62,7 +61,8 @@ class InstallationTask : public AsynchronousTask
 {
     Q_OBJECT
 public:
-    InstallationTask(const InstallationLocation &installationLocation, const QUrl &sourceUrl, QObject *parent = 0);
+    InstallationTask(const InstallationLocation &installationLocation, const QUrl &sourceUrl,
+                     QObject *parent = nullptr);
     ~InstallationTask();
 
     void acknowledge();
@@ -75,9 +75,9 @@ protected:
     void execute() override;
 
 private:
-    void startInstallation() throw(Exception);
-    void finishInstallation() throw(Exception);
-    void checkExtractedFile(const QString &file) throw(Exception);
+    void startInstallation() Q_DECL_NOEXCEPT_EXPR(false);
+    void finishInstallation() Q_DECL_NOEXCEPT_EXPR(false);
+    void checkExtractedFile(const QString &file) Q_DECL_NOEXCEPT_EXPR(false);
 
 private:
     ApplicationInstaller *m_ai;
@@ -88,7 +88,8 @@ private:
     bool m_locked = false;
     uint m_extractedFileCount = 0;
     bool m_managerApproval = false;
-    Application *m_app = nullptr;
+    QScopedPointer<Application> m_app;
+    uint m_applicationUid = uint(-1);
 
     // changes to these 4 member variables are protected by m_mutex
     PackageExtractor *m_extractor = nullptr;

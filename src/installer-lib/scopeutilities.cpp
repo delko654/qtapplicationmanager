@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -39,6 +39,7 @@
 **
 ****************************************************************************/
 
+#include "logging.h"
 #include "scopeutilities.h"
 #include "applicationinstaller_p.h"
 #include "utilities.h"
@@ -240,7 +241,7 @@ bool ScopedRenamer::internalRename(const QDir &dir, const QString &from, const Q
 
     if (true) {
 #endif
-        if (toInfo.exists() && !recursiveOperation(toInfo.absoluteFilePath(), SafeRemove()))
+        if (toInfo.exists() && !recursiveOperation(toInfo.absoluteFilePath(), safeRemove))
             return false;
     }
 #ifdef Q_OS_UNIX

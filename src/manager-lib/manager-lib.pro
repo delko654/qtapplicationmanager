@@ -1,14 +1,14 @@
+TEMPLATE = lib
 TARGET = QtAppManManager
 MODULE = appman_manager
 
 load(am-config)
 
 QT = core network qml
-!headless:QT *= gui quick
+!headless:QT *= gui gui-private quick qml-private
 qtHaveModule(dbus):QT *= dbus
 QT_FOR_PRIVATE *= \
     appman_common-private \
-    appman_crypto-private \
     appman_application-private \
     appman_notification-private \
     appman_plugininterfaces-private \
@@ -16,12 +16,12 @@ QT_FOR_PRIVATE *= \
 CONFIG *= static internal_module
 
 multi-process {
-    PKGCONFIG += "'dbus-1 >= 1.6'"
+    LIBS += -ldl
 }
 
 HEADERS += \
     applicationmanager.h \
-    applicationinterface.h \
+    applicationmodel.h \
     applicationdatabase.h \
     notificationmanager.h \
     abstractcontainer.h \
@@ -34,22 +34,20 @@ HEADERS += \
     applicationipcmanager.h \
     applicationipcinterface.h \
     applicationipcinterface_p.h \
-    systemmonitor.h \
-    systemmonitor_p.h \
-    processmonitor.h \
-    memorymonitor.h \
-    fpsmonitor.h \
+    applicationmanager_p.h \
+    systemreader.h \
+    debugwrapper.h \
+
+linux:HEADERS += \
+    sysfsreader.h \
 
 !headless:HEADERS += \
     fakeapplicationmanagerwindow.h \
-    window.h \
+    inprocesssurfaceitem.h
 
 multi-process:HEADERS += \
     nativeruntime.h \
     nativeruntime_p.h \
-
-linux:HEADERS += \
-    sysfsreader.h \
 
 qtHaveModule(qml):HEADERS += \
     qmlinprocessruntime.h \
@@ -57,7 +55,7 @@ qtHaveModule(qml):HEADERS += \
 
 SOURCES += \
     applicationmanager.cpp \
-    applicationinterface.cpp \
+    applicationmodel.cpp \
     applicationdatabase.cpp \
     notificationmanager.cpp \
     abstractcontainer.cpp \
@@ -69,21 +67,18 @@ SOURCES += \
     quicklauncher.cpp \
     applicationipcmanager.cpp \
     applicationipcinterface.cpp \
-    systemmonitor.cpp \
-    systemmonitor_p.cpp \
-    processmonitor.cpp \
-    memorymonitor.cpp \
-    fpsmonitor.cpp \
-
-!headless:SOURCES += \
-    fakeapplicationmanagerwindow.cpp \
-    window.cpp \
-
-multi-process:SOURCES += \
-    nativeruntime.cpp \
+    systemreader.cpp \
+    debugwrapper.cpp \
 
 linux:SOURCES += \
     sysfsreader.cpp \
+
+!headless:SOURCES += \
+    fakeapplicationmanagerwindow.cpp \
+    inprocesssurfaceitem.cpp
+
+multi-process:SOURCES += \
+    nativeruntime.cpp \
 
 qtHaveModule(qml):SOURCES += \
     qmlinprocessruntime.cpp \

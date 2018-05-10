@@ -1,7 +1,7 @@
 #!/bin/bash
 #############################################################################
 ##
-## Copyright (C) 2016 Pelagicore AG
+## Copyright (C) 2018 Pelagicore AG
 ## Contact: https://www.qt.io/licensing/
 ##
 ## This file is part of the Pelagicore Application Manager.
@@ -27,8 +27,10 @@
 ##
 #############################################################################
 
+#set -x
+
 # check basic requirement
-[ "${LANG%%.UTF-8}" = "$LANG" ] && ( echo "The application-packager needs to be run with UTF-8 locale variant"; exit 1; )
+[ "$(uname)" != "Darwin" ] && [ "${LANG%%.UTF-8}" = "$LANG" ] && ( echo "The application-packager needs to be run with UTF-8 locale variant"; exit 1; )
 [ ! -d certificates ] && ( echo "Please cd to the tests/data directory before running this script"; exit 1; )
 
 # having $LC_ALL set to "C" will screw us big time - especially since QtCreator sets this
@@ -43,9 +45,10 @@ usage()
      exit 1
 }
 
-PACKAGER="$1"
-
+[ "$#" -lt 1 ] && usage
+PACKAGER="${@: -1}"
 [ ! -x "$PACKAGER" ] && usage
+eval ${@:1:$# - 1}
 "$PACKAGER" --version 2>/dev/null | grep -qsi "Packager" || usage
 
 ( cd certificates && ./create-test-certificates.sh )
@@ -138,13 +141,19 @@ mv "$src"/--PACKAGE-HEADER--{.orig,}
 
 info "Create a package with an invalid id header field"
 mv "$src"/--PACKAGE-HEADER--{,.orig}
-sed <"$src/--PACKAGE-HEADER--.orig" >"$src/--PACKAGE-HEADER--" "s/applicationId: '[a-z0-9.-]*'/applicationId: 'invalid'/"
+sed <"$src/--PACKAGE-HEADER--.orig" >"$src/--PACKAGE-HEADER--" "s/applicationId: '[a-z0-9.-]*'/applicationId: ':invalid'/"
 tar -C "$src" -cf "$dst/test-invalid-header-id.appkg" -- --PACKAGE-HEADER-- info.yaml icon.png test --PACKAGE-FOOTER--
+mv "$src"/--PACKAGE-HEADER--{.orig,}
+
+info "Create a package with an non-matching id header field"
+mv "$src"/--PACKAGE-HEADER--{,.orig}
+sed <"$src/--PACKAGE-HEADER--.orig" >"$src/--PACKAGE-HEADER--" "s/applicationId: '[a-z0-9.-]*'/applicationId: 'non-matching'/"
+tar -C "$src" -cf "$dst/test-non-matching-header-id.appkg" -- --PACKAGE-HEADER-- info.yaml icon.png test --PACKAGE-FOOTER--
 mv "$src"/--PACKAGE-HEADER--{.orig,}
 
 info "Create a package with an invalid info.yaml id"
 mv "$src"/info.yaml{,.orig}
-sed <"$src/info.yaml.orig" >"$src/info.yaml" 's/id: "[a-z0-9.-]*"/id: "invalid"/'
+sed <"$src/info.yaml.orig" >"$src/info.yaml" 's/id: "[a-z0-9.-]*"/id: ":invalid"/'
 tar -C "$src" -cf "$dst/test-invalid-info-id.appkg" -- --PACKAGE-HEADER-- info.yaml icon.png test --PACKAGE-FOOTER--
 mv "$src"/info.yaml{.orig,}
 

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -39,12 +39,33 @@
 **
 ****************************************************************************/
 
+#include <QUuid>
+
 #include "global.h"
+#include "logging.h"
 #include "application.h"
 #include "abstractruntime.h"
 #include "abstractcontainer.h"
-#include "cryptography.h"
 #include "exception.h"
+
+/*!
+    \qmltype Runtime
+    \inqmlmodule QtApplicationManager
+    \brief The handle for a runtime that is executing an \l Application.
+
+    While an \l Application is running, the associated Runtime object will be valid and yield access
+    to runtime related information.
+
+    Right now, only the accessor property for the \l Container object is exposed to the QML side.
+*/
+/*!
+    \qmlproperty Container Runtime::container
+    \readonly
+
+    This property returns the \l Container object of a running application. Please see the \l{Containers}
+    {general Container} and the \l Container class documentation for more information on containers
+    within the application-manager.
+*/
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -54,11 +75,8 @@ AbstractRuntime::AbstractRuntime(AbstractContainer *container, const Application
     , m_app(app)
     , m_manager(manager)
 {
-    m_securityToken = Cryptography::generateRandomBytes(SecurityTokenSize);
-    if (m_securityToken.size() != SecurityTokenSize) {
-        qCCritical(LogSystem) << "ERROR: Not enough entropy left to generate a security token - shuting down";
-        abort();
-    }
+    Q_STATIC_ASSERT(SecurityTokenSize == sizeof(QUuid));
+    m_securityToken = QUuid::createUuid().toRfc4122();
 }
 
 QVariantMap AbstractRuntime::configuration() const
@@ -68,38 +86,64 @@ QVariantMap AbstractRuntime::configuration() const
     return QVariantMap();
 }
 
-QVariantMap AbstractRuntime::additionalConfiguration() const
+QVariantMap AbstractRuntime::systemProperties() const
 {
-    if (m_manager)
-        return m_manager->additionalConfiguration();
+    if (m_manager && m_app)
+        return m_app->isBuiltIn() ? m_manager->systemPropertiesBuiltIn() : m_manager->systemProperties3rdParty();
     return QVariantMap();
 }
+
+#if !defined(AM_HEADLESS)
+void AbstractRuntime::inProcessSurfaceItemReleased(QQuickItem *)
+{
+    // generally there is nothing to do
+}
+#endif
 
 QByteArray AbstractRuntime::securityToken() const
 {
     return m_securityToken;
 }
 
-void AbstractRuntime::openDocument(const QString &document)
+
+void setOpenGLConfiguration(const QVariantMap &openGLConfiguration)
+{
+    // not every runtime needs this information
+    Q_UNUSED(openGLConfiguration)
+}
+
+void AbstractRuntime::openDocument(const QString &document, const QString &mimeType)
 {
     Q_UNUSED(document)
+    Q_UNUSED(mimeType)
+}
+
+void AbstractRuntime::setSlowAnimations(bool slow)
+{
+    // not every runtime needs this information
+    Q_UNUSED(slow)
 }
 
 const Application *AbstractRuntime::application() const
 {
-    return m_app;
+    return m_app.data();
 }
 
 AbstractRuntime::~AbstractRuntime()
 {
     if (m_app && m_app->currentRuntime() == this)
-        m_app->setCurrentRuntime(0);
+        m_app->setCurrentRuntime(nullptr);
     delete m_container;
 }
 
 AbstractRuntimeManager *AbstractRuntime::manager() const
 {
     return m_manager;
+}
+
+bool AbstractRuntime::needsLauncher() const
+{
+    return false;
 }
 
 bool AbstractRuntime::isQuickLauncher() const
@@ -111,6 +155,19 @@ bool AbstractRuntime::attachApplicationToQuickLauncher(const Application *app)
 {
     Q_UNUSED(app)
     return false;
+}
+
+AbstractRuntime::State AbstractRuntime::state() const
+{
+    return m_state;
+}
+
+void AbstractRuntime::setState(AbstractRuntime::State newState)
+{
+    if (m_state != newState) {
+        m_state = newState;
+        emit stateChanged(newState);
+    }
 }
 
 void AbstractRuntime::setInProcessQmlEngine(QQmlEngine *engine)
@@ -163,14 +220,30 @@ void AbstractRuntimeManager::setConfiguration(const QVariantMap &configuration)
     m_configuration = configuration;
 }
 
-QVariantMap AbstractRuntimeManager::additionalConfiguration() const
+QVariantMap AbstractRuntimeManager::systemPropertiesBuiltIn() const
 {
-    return m_additionalConfiguration;
+    return m_systemPropertiesBuiltIn;
 }
 
-void AbstractRuntimeManager::setAdditionalConfiguration(const QVariantMap &additionalConfiguration)
+QVariantMap AbstractRuntimeManager::systemProperties3rdParty() const
 {
-    m_additionalConfiguration = additionalConfiguration;
+    return m_systemProperties3rdParty;
+}
+
+void AbstractRuntimeManager::setSystemProperties(const QVariantMap &thirdParty, const QVariantMap &builtIn)
+{
+    m_systemProperties3rdParty = thirdParty;
+    m_systemPropertiesBuiltIn = builtIn;
+}
+
+QVariantMap AbstractRuntimeManager::systemOpenGLConfiguration() const
+{
+    return m_systemOpenGLConfiguration;
+}
+
+void AbstractRuntimeManager::setSystemOpenGLConfiguration(const QVariantMap &openGLConfiguration)
+{
+    m_systemOpenGLConfiguration = openGLConfiguration;
 }
 
 QT_END_NAMESPACE_AM

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -64,7 +64,8 @@ public:
     }
 };
 
-QByteArray SignaturePrivate::create(const QByteArray &signingCertificatePkcs12, const QByteArray &signingCertificatePassword) throw(Exception)
+QByteArray SignaturePrivate::create(const QByteArray &signingCertificatePkcs12,
+                                    const QByteArray &signingCertificatePassword) Q_DECL_NOEXCEPT_EXPR(false)
 {
     HCERTSTORE certStore = nullptr;
 
@@ -86,15 +87,15 @@ QByteArray SignaturePrivate::create(const QByteArray &signingCertificatePkcs12, 
 
         certStore = PFXImportCertStore(&pkcs12Blob,
                                        reinterpret_cast<const wchar_t *>(password.utf16()),
-                                       CRYPT_EXPORTABLE);
+                                       PKCS12_NO_PERSIST_KEY);
         if (!certStore)
             throw WinCryptException("could not read or not parse PKCS#12 certificate");
 
         QVector<PCCERT_CONTEXT> signCerts;
         QVector<PCCERT_CONTEXT> allCerts;
 
-        PCCERT_CONTEXT cert = 0;
-        while (cert = CertEnumCertificatesInStore(certStore, cert)) {
+        PCCERT_CONTEXT cert = nullptr;
+        while ((cert = CertEnumCertificatesInStore(certStore, cert))) {
             BYTE keyUsage = 0;
             if (!CertGetIntendedKeyUsage(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, cert->pCertInfo,
                                          &keyUsage, sizeof(keyUsage))
@@ -138,7 +139,8 @@ QByteArray SignaturePrivate::create(const QByteArray &signingCertificatePkcs12, 
     }
 }
 
-bool SignaturePrivate::verify(const QByteArray &signaturePkcs7, const QList<QByteArray> &chainOfTrust) throw(Exception)
+bool SignaturePrivate::verify(const QByteArray &signaturePkcs7,
+                              const QList<QByteArray> &chainOfTrust) Q_DECL_NOEXCEPT_EXPR(false)
 {
     PCCERT_CONTEXT signerCert = nullptr;
     HCERTSTORE msgCertStore = nullptr;
@@ -191,7 +193,7 @@ bool SignaturePrivate::verify(const QByteArray &signaturePkcs7, const QList<QByt
         if (!rootCertStore)
             throw WinCryptException("Could not create temporary root certificate store");
 
-        foreach (const QByteArray &trustedCert, chainOfTrust) {
+        for (const QByteArray &trustedCert : chainOfTrust) {
             // convert from PEM to DER
             DWORD derSize = 0;
             if (!CryptStringToBinaryA(trustedCert.constData(), trustedCert.size(), CRYPT_STRING_BASE64HEADER,
@@ -227,8 +229,11 @@ bool SignaturePrivate::verify(const QByteArray &signaturePkcs7, const QList<QByt
             throw WinCryptException("Could not verify certificate chain");
         }
 
-        if (chainContext->TrustStatus.dwErrorStatus != CERT_TRUST_NO_ERROR)
-            throw WinCryptException("Failed to verify signature");
+        if (chainContext->TrustStatus.dwErrorStatus != CERT_TRUST_NO_ERROR) {
+            throw Exception("Failed to verify signature (error: 0x%1, info: 0x%2")
+                .arg(chainContext->TrustStatus.dwErrorStatus, 8, 16, qL1C('0'))
+                .arg(chainContext->TrustStatus.dwInfoStatus, 8, 16, qL1C('0'));
+        }
 
         cleanup();
         return true;

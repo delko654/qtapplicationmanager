@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -47,18 +47,21 @@
 
 QT_BEGIN_NAMESPACE_AM
 
+class MemoryWatcher;
+
 class ProcessContainerManager : public AbstractContainerManager
 {
     Q_OBJECT
 public:
-    explicit ProcessContainerManager(QObject *parent = 0);
-    explicit ProcessContainerManager(const QString &id, QObject *parent = 0);
+    explicit ProcessContainerManager(QObject *parent = nullptr);
+    explicit ProcessContainerManager(const QString &id, QObject *parent = nullptr);
 
     static QString defaultIdentifier();
     bool supportsQuickLaunch() const override;
 
-    AbstractContainer *create() override;
-    AbstractContainer *create(const ContainerDebugWrapper &debugWrapper) override;
+    AbstractContainer *create(const Application *app, const QVector<int> &stdioRedirections,
+                              const QMap<QString, QString> &debugWrapperEnvironment,
+                              const QStringList &debugWrapperCommand) override;
 };
 
 class HostProcess : public AbstractContainerProcess
@@ -67,32 +70,34 @@ class HostProcess : public AbstractContainerProcess
 
 public:
     HostProcess();
+    virtual ~HostProcess();
 
     virtual qint64 processId() const override;
     virtual QProcess::ProcessState state() const override;
 
-    void setRedirections(const QVector<int> &stdRedirections);
+    void setStdioRedirections(const QVector<int> &stdioRedirections);
+    void setWorkingDirectory(const QString &dir);
+    void setProcessEnvironment(const QProcessEnvironment &environment);
 
 public slots:
     void kill() override;
     void terminate() override;
 
     void start(const QString &program, const QStringList &arguments);
-    void setWorkingDirectory(const QString &dir) override;
-    void setProcessEnvironment(const QProcessEnvironment &environment) override;
     void setStopBeforeExec(bool stopBeforeExec);
 
 private:
-    class MyQProcess : public QProcess
+    class MyQProcess : public QProcess // clazy:exclude=missing-qobject-macro
     {
     protected:
         void setupChildProcess() override;
     public:
         bool m_stopBeforeExec = false;
-        QVector<int> m_stdRedirections;
+        QVector<int> m_stdioRedirections;
     };
 
     MyQProcess m_process;
+    qint64 m_pid = 0;
 };
 
 class ProcessContainer : public AbstractContainer
@@ -100,8 +105,10 @@ class ProcessContainer : public AbstractContainer
     Q_OBJECT
 
 public:
-    explicit ProcessContainer(ProcessContainerManager *manager);
-    explicit ProcessContainer(const ContainerDebugWrapper &debugWrapper, ProcessContainerManager *manager);
+    explicit ProcessContainer(ProcessContainerManager *manager, const Application *app,
+                              const QVector<int> &stdioRedirections,
+                              const QMap<QString, QString> &debugWrapperEnvironment,
+                              const QStringList &debugWrapperCommand);
     ~ProcessContainer();
 
     QString controlGroup() const override;
@@ -109,12 +116,15 @@ public:
 
     bool isReady() override;
 
-    AbstractContainerProcess *start(const QStringList &arguments, const QProcessEnvironment &environment) override;
+    AbstractContainerProcess *start(const QStringList &arguments,
+                                    const QMap<QString, QString> &runtimeEnvironment) override;
 
 private:
     QString m_currentControlGroup;
-    bool m_useDebugWrapper = false;
-    ContainerDebugWrapper m_debugWrapper;
+    QVector<int> m_stdioRedirections;
+    QMap<QString, QString> m_debugWrapperEnvironment;
+    QStringList m_debugWrapperCommand;
+    MemoryWatcher *m_memWatcher = nullptr;
 };
 
 QT_END_NAMESPACE_AM

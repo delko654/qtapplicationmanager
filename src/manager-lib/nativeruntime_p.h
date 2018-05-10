@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,7 +41,7 @@
 
 #pragma once
 
-#include "applicationinterface.h"
+#include <QtAppManApplication/applicationinterface.h>
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -56,7 +56,16 @@ public:
     NativeRuntimeApplicationInterface(NativeRuntime *runtime);
 
     QString applicationId() const override;
-    QVariantMap additionalConfiguration() const override;
+    QVariantMap name() const override;
+    QUrl icon() const override;
+    QString version() const override;
+    QVariantMap systemProperties() const override;
+    QVariantMap applicationProperties() const override;
+
+    virtual void finishedInitialization() override;
+
+signals:
+    void applicationFinishedInitialization();
 
 private:
     NativeRuntime *m_runtime;
@@ -70,12 +79,10 @@ class NativeRuntimeInterface : public QObject
 public:
     NativeRuntimeInterface(NativeRuntime *runtime);
 
-    Q_SCRIPTABLE void finishedInitialization();
-
 signals:
-    Q_SCRIPTABLE void startApplication(const QString &baseDir, const QString &app, const QString &document, const QVariantMap &application);
-
-    void launcherFinishedInitialization();
+    Q_SCRIPTABLE void startApplication(const QString &baseDir, const QString &app, const QString &document,
+                                       const QString &mimeType, const QVariantMap &application,
+                                       const QVariantMap &systemProperties);
 
 private:
     NativeRuntime *m_runtime;

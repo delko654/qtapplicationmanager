@@ -5,18 +5,18 @@
     "QtAppManPackage" => "$basedir/src/package-lib",
     "QtAppManNotification" => "$basedir/src/notification-lib",
     "QtAppManManager" => "$basedir/src/manager-lib",
+    "QtAppManSharedMain" => "$basedir/src/shared-main-lib",
+    "QtAppManMain" => "$basedir/src/main-lib",
+    "QtAppManWindow" => "$basedir/src/window-lib",
     "QtAppManInstaller" => "$basedir/src/installer-lib",
+    "QtAppManLauncher" => "$basedir/src/launcher-lib",
     "QtAppManPluginInterfaces" => "$basedir/src/plugin-interfaces",
+    "QtAppManMonitor" => "$basedir/src/monitor-lib",
+    "QtAppManDBus" => "$basedir/src/dbus-lib",
 );
 %moduleheaders = ( # restrict the module headers to those found in relative path
 );
 @allmoduleheadersprivate = ();
-#    "QtAppManCommon",
-#    "QtAppManCrypto",
-#    "QtAppManNotification",
-#    "QtAppManManager",
-#    "QtAppManInstaller",
-#);
 %classnames = (
 );
 %deprecatedheaders = (

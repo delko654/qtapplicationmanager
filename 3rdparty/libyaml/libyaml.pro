@@ -1,3 +1,4 @@
+TEMPLATE = lib
 TARGET = qtyaml
 
 load(am-config)
@@ -7,6 +8,9 @@ CONFIG += \
     hide_symbols \
     exceptions_off rtti_off warn_off \
     installed
+
+MODULE_DEFINES *= YAML_DECLARE_STATIC
+MODULE_INCLUDEPATH += $$PWD/include
 
 load(qt_helper_lib)
 

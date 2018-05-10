@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,7 +41,7 @@
 
 #pragma once
 
-#include "packagecreator.h"
+#include <QtAppManPackage/packagecreator.h>
 
 #include <archive.h>
 
@@ -70,6 +70,7 @@ private:
 
     QByteArray m_digest;
     const InstallationReport &m_report;
+    QVariantMap m_metaData;
 
     friend class PackageCreator;
 };

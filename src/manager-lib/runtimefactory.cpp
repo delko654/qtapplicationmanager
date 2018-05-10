@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -42,6 +42,7 @@
 #include <QScopedPointer>
 #include <QCoreApplication>
 
+#include "logging.h"
 #include "application.h"
 #include "abstractruntime.h"
 #include "abstractcontainer.h"
@@ -93,8 +94,10 @@ AbstractRuntime *RuntimeFactory::create(AbstractContainer *container, const Appl
 
     AbstractRuntime *art = arm->create(ac.take(), app);
 
-    if (art)
+    if (art) {
+        art->setSlowAnimations(m_slowAnimations);
         app->setCurrentRuntime(art);
+    }
     return art;
 }
 
@@ -106,21 +109,33 @@ AbstractRuntime *RuntimeFactory::createQuickLauncher(AbstractContainer *containe
     if (!arm)
         return nullptr;
 
-    return arm->create(ac.take(), nullptr);
+    auto runtime = arm->create(ac.take(), nullptr);
+    if (runtime)
+        runtime->setSlowAnimations(m_slowAnimations);
+    return runtime;
 }
 
 void RuntimeFactory::setConfiguration(const QVariantMap &configuration)
 {
-    for (auto it = m_runtimes.cbegin(); it != m_runtimes.cend(); ++it) {
+    for (auto it = m_runtimes.cbegin(); it != m_runtimes.cend(); ++it)
         it.value()->setConfiguration(configuration.value(it.key()).toMap());
-    }
 }
 
-void RuntimeFactory::setAdditionalConfiguration(const QVariantMap &additionalConfiguration)
+void RuntimeFactory::setSystemProperties(const QVariantMap &thirdParty, const QVariantMap &builtIn)
 {
-    for (auto it = m_runtimes.cbegin(); it != m_runtimes.cend(); ++it) {
-        it.value()->setAdditionalConfiguration(additionalConfiguration);
-    }
+    for (auto it = m_runtimes.cbegin(); it != m_runtimes.cend(); ++it)
+        it.value()->setSystemProperties(thirdParty, builtIn);
+}
+
+void RuntimeFactory::setSlowAnimations(bool value)
+{
+    m_slowAnimations = value;
+}
+
+void RuntimeFactory::setSystemOpenGLConfiguration(const QVariantMap &openGLConfiguration)
+{
+    for (auto it = m_runtimes.cbegin(); it != m_runtimes.cend(); ++it)
+        it.value()->setSystemOpenGLConfiguration(openGLConfiguration);
 }
 
 bool RuntimeFactory::registerRuntime(AbstractRuntimeManager *manager)
@@ -134,6 +149,12 @@ bool RuntimeFactory::registerRuntime(AbstractRuntimeManager *manager, const QStr
         return false;
     m_runtimes.insert(identifier, manager);
     manager->setParent(this);
+    static bool once = false;
+    if (!once) {
+        qCDebug(LogSystem) << "Registering runtimes:";
+        once = true;
+    }
+    qCDebug(LogSystem).noquote() << " *" << identifier << (manager->supportsQuickLaunch() ? "[quicklaunch supported]" : "");
     return true;
 }
 

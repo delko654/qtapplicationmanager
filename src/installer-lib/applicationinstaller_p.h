@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -46,10 +46,8 @@
 #include <QSet>
 #include <QThread>
 
-#include "applicationinstaller.h"
-#include "sudo.h"
-#include <QtAppManCommon/exception.h>
-#include "dbus-policy.h"
+#include <QtAppManInstaller/applicationinstaller.h>
+#include <QtAppManInstaller/sudo.h>
 #include <QtAppManCommon/global.h>
 
 QT_BEGIN_NAMESPACE_AM
@@ -80,8 +78,6 @@ public:
 
     QMutex activationLock;
     QMap<QString, QString> activatedPackages; // id -> installationPath
-
-    QMap<QByteArray, DBusPolicy> dbusPolicy;
 };
 
 QT_END_NAMESPACE_AM

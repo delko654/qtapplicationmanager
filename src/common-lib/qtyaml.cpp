@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -53,7 +53,7 @@ QT_BEGIN_NAMESPACE
 
 namespace QtYaml {
 
-static QVariant convertYamlNodeToVariant(yaml_document_t *doc, yaml_node_t *node)
+static QVariant convertYamlNodeToVariant(yaml_document_t *doc, yaml_node_t *node, std::function<QVariant (const QVariant &)> &filter)
 {
     QVariant result;
 
@@ -88,11 +88,11 @@ static QVariant convertYamlNodeToVariant(yaml_document_t *doc, yaml_node_t *node
         };
 
         static QVariant staticValues[] = {
-            QVariant(),        // ValueNull
-            QVariant(true),    // ValueTrue
-            QVariant(false),   // ValueFalse
-            QVariant(qQNaN()), // ValueNaN
-            QVariant(qInf()),  // ValueInf
+            QVariant(),                    // ValueNull
+            QVariant(true),                // ValueTrue
+            QVariant(false),               // ValueFalse
+            QVariant(qQNaN()),             // ValueNaN
+            QVariant(qInf()),              // ValueInf
         };
 
         static const StaticMapping staticMappings[] = { // keep this sorted for bsearch !!
@@ -213,7 +213,7 @@ static QVariant convertYamlNodeToVariant(yaml_document_t *doc, yaml_node_t *node
         for (auto seq = node->data.sequence.items.start; seq < node->data.sequence.items.top; ++seq) {
             yaml_node_t *seqNode = yaml_document_get_node(doc, *seq);
             if (seqNode)
-                array.append(convertYamlNodeToVariant(doc, seqNode));
+                array.append(convertYamlNodeToVariant(doc, seqNode, filter));
             else
                 array.append(QVariant());
         }
@@ -226,7 +226,7 @@ static QVariant convertYamlNodeToVariant(yaml_document_t *doc, yaml_node_t *node
             yaml_node_t *keyNode = yaml_document_get_node(doc, map->key);
             yaml_node_t *valueNode = yaml_document_get_node(doc, map->value);
             if (keyNode && valueNode) {
-                QVariant key = convertYamlNodeToVariant(doc, keyNode);
+                QVariant key = convertYamlNodeToVariant(doc, keyNode, filter);
                 QString keyStr = key.toString();
 
                 if (key.type() != QVariant::String)
@@ -234,7 +234,7 @@ static QVariant convertYamlNodeToVariant(yaml_document_t *doc, yaml_node_t *node
                 if (object.contains(keyStr))
                     qWarning() << "YAML Parser: duplicate key" << keyStr << "found in mapping";
 
-                object.insert(keyStr, convertYamlNodeToVariant(doc, valueNode));
+                object.insert(keyStr, convertYamlNodeToVariant(doc, valueNode, filter));
             }
         }
         result = object;
@@ -244,12 +244,18 @@ static QVariant convertYamlNodeToVariant(yaml_document_t *doc, yaml_node_t *node
         break;
     }
 
-    return result;
+    return filter(result);
 }
 
 
 
 QVector<QVariant> variantDocumentsFromYaml(const QByteArray &yaml, ParseError *error)
+{
+    auto noFilter = [](const QVariant &v) { return v; };
+    return variantDocumentsFromYamlFiltered(yaml, noFilter, error);
+}
+
+QVector<QVariant> variantDocumentsFromYamlFiltered(const QByteArray &yaml, std::function<QVariant(const QVariant &)> filter, ParseError *error)
 {
     QVector<QVariant> result;
 
@@ -260,8 +266,9 @@ QVector<QVariant> variantDocumentsFromYaml(const QByteArray &yaml, ParseError *e
     if (yaml_parser_initialize(&p)) {
         yaml_parser_set_input_string(&p, (const uchar *) yaml.constData(), yaml.size());
 
-        forever {
-            yaml_document_t doc;
+        yaml_document_t doc;
+        yaml_node_t *root;
+        do {
             if (!yaml_parser_load(&p, &doc)) {
                 if (error) {
                     switch (p.error) {
@@ -276,17 +283,13 @@ QVector<QVariant> variantDocumentsFromYaml(const QByteArray &yaml, ParseError *e
                         break;
                     }
                 }
-                result << QVariant();
-                break;
-            } else {
-                yaml_node_t *root = yaml_document_get_root_node(&doc);
-                if (!root)
-                    break;
-
-                result << convertYamlNodeToVariant(&doc, root);
             }
+            root = yaml_document_get_root_node(&doc);
+            if (root)
+                result.append(convertYamlNodeToVariant(&doc, root, filter));
             yaml_document_delete(&doc);
-        }
+        } while (root);
+
         yaml_parser_delete(&p);
     } else if (error) {
         *error = ParseError(qSL("could not initialize YAML parser"));
@@ -294,13 +297,13 @@ QVector<QVariant> variantDocumentsFromYaml(const QByteArray &yaml, ParseError *e
     return result;
 }
 
-static inline void yerr(int result) throw(std::exception)
+static inline void yerr(int result) Q_DECL_NOEXCEPT_EXPR(false)
 {
     if (!result)
         throw std::exception();
 }
 
-static void emitYamlScalar(yaml_emitter_t *e, const QByteArray &ba, bool quoting = false)
+static void emitYamlScalar(yaml_emitter_t *e, const QByteArray &ba, bool quoting = false) Q_DECL_NOEXCEPT_EXPR(false)
 {
     yaml_event_t event;
     yerr(yaml_scalar_event_initialize(&event,
@@ -314,7 +317,7 @@ static void emitYamlScalar(yaml_emitter_t *e, const QByteArray &ba, bool quoting
     yerr(yaml_emitter_emit(e, &event));
 }
 
-static void emitYaml(yaml_emitter_t *e, const QVariant &value, YamlStyle style)
+static void emitYaml(yaml_emitter_t *e, const QVariant &value, YamlStyle style) Q_DECL_NOEXCEPT_EXPR(false)
 {
     yaml_event_t event;
 
@@ -345,7 +348,8 @@ static void emitYaml(yaml_emitter_t *e, const QVariant &value, YamlStyle style)
         yerr(yaml_sequence_start_event_initialize(&event, nullptr, nullptr, 1, style == FlowStyle ? YAML_FLOW_SEQUENCE_STYLE : YAML_BLOCK_SEQUENCE_STYLE));
         yerr(yaml_emitter_emit(e, &event));
 
-        foreach (const QVariant &listValue, value.toList())
+        const QVariantList list = value.toList();
+        for (const QVariant &listValue : list)
             emitYaml(e, listValue, style);
 
         yerr(yaml_sequence_end_event_initialize(&event));
@@ -390,7 +394,7 @@ QByteArray yamlFromVariantDocuments(const QVector<QVariant> &documents, YamlStyl
         bool first = true;
         yaml_version_directive_t yamlVersion { 1, 1 };
 
-        foreach (const QVariant &doc, documents) {
+        for (const QVariant &doc : documents) {
             yerr(yaml_document_start_event_initialize(&event, first ? &yamlVersion : nullptr, nullptr, nullptr, 0));
             yerr(yaml_emitter_emit(&e, &event));
 

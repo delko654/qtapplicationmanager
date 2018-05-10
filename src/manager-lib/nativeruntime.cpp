@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -45,8 +45,11 @@
 #include <QDBusConnection>
 #include <QDBusError>
 #include <QTimer>
+#include <QUuid>
+#include <QLibraryInfo>
 
 #include "global.h"
+#include "logging.h"
 #include "application.h"
 #include "applicationmanager.h"
 #include "nativeruntime.h"
@@ -57,6 +60,8 @@
 #include "applicationipcmanager.h"
 #include "applicationipcinterface.h"
 #include "utilities.h"
+#include "notificationmanager.h"
+#include "dbus-utilities.h"
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -65,16 +70,25 @@ QT_BEGIN_NAMESPACE_AM
 
 // #define EXPORT_P2PBUS_OBJECTS_TO_SESSION_BUS 1
 
-#if defined(AM_MULTI_PROCESS)
+#if defined(AM_MULTI_PROCESS) && defined(Q_OS_LINUX)
 QT_END_NAMESPACE_AM
-#  include <dbus/dbus.h>
+#  include <dlfcn.h>
 #  include <sys/socket.h>
 QT_BEGIN_NAMESPACE_AM
 
 static qint64 getDBusPeerPid(const QDBusConnection &conn)
 {
+    typedef bool (*am_dbus_connection_get_socket_t)(void *, int *);
+    static am_dbus_connection_get_socket_t am_dbus_connection_get_socket = nullptr;
+
+    if (!am_dbus_connection_get_socket)
+        am_dbus_connection_get_socket = (am_dbus_connection_get_socket_t) dlsym(RTLD_DEFAULT, "dbus_connection_get_socket");
+
+    if (!am_dbus_connection_get_socket)
+        qFatal("ERROR: could not resolve 'dbus_connection_get_socket' from libdbus-1");
+
     int socketFd = -1;
-    if (dbus_connection_get_socket(static_cast<DBusConnection *>(conn.internalPointer()), &socketFd)) {
+    if (am_dbus_connection_get_socket(conn.internalPointer(), &socketFd)) {
         struct ucred ucred;
         socklen_t ucredSize = sizeof(struct ucred);
         if (getsockopt(socketFd, SOL_SOCKET, SO_PEERCRED, &ucred, &ucredSize) == 0)
@@ -97,7 +111,46 @@ NativeRuntime::NativeRuntime(AbstractContainer *container, const Application *ap
     : AbstractRuntime(container, app, manager)
     , m_isQuickLauncher(app == nullptr)
     , m_needsLauncher(manager->identifier() != qL1S("native"))
-{ }
+{
+    QString dbusAddress = QUuid::createUuid().toString().mid(1,36);
+    m_applicationInterfaceServer = new QDBusServer(qSL("unix:path=/tmp/dbus-qtam-") + dbusAddress);
+
+    connect(m_applicationInterfaceServer, &QDBusServer::newConnection,
+            this, [this](const QDBusConnection &connection) {
+#if defined(Q_OS_OSX)
+        // getting the pid is not supported on macOS. Accepting everything is not secure
+        // but it at least works
+        onDBusPeerConnection(connection);
+#else
+        qint64 pid = getDBusPeerPid(connection);
+        if (pid <= 0) {
+            QDBusConnection::disconnectFromPeer(connection.name());
+            qCWarning(LogSystem) << "Could not retrieve peer pid on D-Bus connection attempt.";
+            return;
+        }
+
+        // try direct PID mapping first, then check for sub-processes ... this happens when
+        // for example running the app via gdbserver
+        qint64 appmanPid = QCoreApplication::applicationPid();
+
+        while ((pid > 1) && (pid != appmanPid)) {
+            if (applicationProcessId() == pid) {
+                onDBusPeerConnection(connection);
+                return;
+            }
+            pid = getParentPid(pid);
+        }
+
+        QDBusConnection::disconnectFromPeer(connection.name());
+        qCWarning(LogSystem) << "Connection attempt on peer D-Bus from unknown pid:" << pid;
+#endif
+    });
+}
+
+QDBusServer *NativeRuntime::applicationInterfaceServer() const
+{
+    return m_applicationInterfaceServer;
+}
 
 NativeRuntime::~NativeRuntime()
 {
@@ -118,51 +171,83 @@ bool NativeRuntime::attachApplicationToQuickLauncher(const Application *app)
     m_app = app;
     m_app->setCurrentRuntime(this);
 
+    setState(Startup);
+
+    bool ret;
     if (!m_dbusConnection) {
         // we have no D-Bus connection yet, so hope for the best
-        return true;
+        ret = true;
     } else {
-        onLauncherFinishedInitialization();
-        return m_launched;
+        onApplicationFinishedInitialization();
+        ret = m_applicationInterfaceConnected;
     }
+
+    if (ret)
+        setState(Active);
+
+    return ret;
 }
 
 bool NativeRuntime::initialize()
 {
     if (m_needsLauncher) {
-        QFileInfo fi(qSL("%1/appman-launcher-%2").arg(QCoreApplication::applicationDirPath(), manager()->identifier()));
-        if (!fi.exists() || !fi.isExecutable())
-            return false;
-        m_container->setProgram(fi.absoluteFilePath());
-        m_container->setBaseDirectory(fi.absolutePath());
+        static QVector<QString> possibleLocations;
+        if (possibleLocations.isEmpty()) {
+            // try the main binaries directory
+            possibleLocations.append(QCoreApplication::applicationDirPath());
+            // try Qt's bin folder
+            possibleLocations.append(QLibraryInfo::location(QLibraryInfo::BinariesPath));
+            // try the AM's build directory
+            possibleLocations.append(qApp->property("_am_build_dir").toString() + qSL("/bin")); // set by main.cpp
+            // if everything fails, try to locate it in $PATH
+            const auto paths = qgetenv("PATH").split(QDir::listSeparator().toLatin1());
+            for (auto path : paths)
+                possibleLocations.append(QString::fromLocal8Bit(path));
+        }
+
+        const QString launcherName = qSL("/appman-launcher-") + manager()->identifier();
+        for (const QString &possibleLocation : possibleLocations) {
+            QFileInfo fi(possibleLocation + launcherName);
+
+            if (fi.exists() && fi.isExecutable()) {
+                m_container->setProgram(fi.absoluteFilePath());
+                m_container->setBaseDirectory(fi.absolutePath());
+                qCDebug(LogSystem) << "Using runtime launcher"<< fi.absoluteFilePath();
+                return true;
+            }
+        }
+        qCWarning(LogSystem) << "Could not find an" << launcherName.mid(1) << "executable in any of:\n"
+                             << possibleLocations;
+        return false;
     } else {
         if (!m_app)
             return false;
 
         m_container->setProgram(m_app->absoluteCodeFilePath());
-        m_container->setBaseDirectory(m_app->baseDir().absolutePath());
+        m_container->setBaseDirectory(m_app->codeDir());
+        return true;
     }
-    return true;
 }
 
 void NativeRuntime::shutdown(int exitCode, QProcess::ExitStatus status)
 {
-    qCDebug(LogSystem) << "NativeRuntime (id:" << (m_app ? m_app->id() : qSL("(none)"))
-                       << "pid:" << m_process->processId() << ") exited with code:" << exitCode
-                       << "status:" << status;
-
-    m_shutingDown = m_launched = m_launchWhenReady = m_started = m_dbusConnection = false;
+    if (!m_isQuickLauncher || m_applicationInterfaceConnected) {
+        qCDebug(LogSystem) << "NativeRuntime (id:" << (m_app ? m_app->id() : qSL("(none)"))
+                           << "pid:" << m_process->processId() << ") exited with code:" << exitCode
+                           << "status:" << status;
+    }
+    m_applicationInterfaceConnected = m_launchWhenReady = m_dbusConnection = false;
 
     // unregister all extension interfaces
-    foreach (ApplicationIPCInterface *iface, ApplicationIPCManager::instance()->interfaces()) {
+    const auto interfaces = ApplicationIPCManager::instance()->interfaces();
+    for (ApplicationIPCInterface *iface : interfaces)
         iface->dbusUnregister(QDBusConnection(m_dbusConnectionName));
-    }
 
     if (m_app)
-        m_app->setCurrentRuntime(0);
+        m_app->setCurrentRuntime(nullptr);
 
     emit finished(exitCode, status);
-    emit stateChanged(state());
+    setState(Inactive);
 
     deleteLater();
 }
@@ -179,25 +264,66 @@ bool NativeRuntime::start()
         break;
     }
 
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(qSL("QT_QPA_PLATFORM"), qSL("wayland"));
-    env.remove(qSL("QT_IM_MODULE"));     // Applications should use wayland text input
-    //env.insert(qSL("QT_WAYLAND_DISABLE_WINDOWDECORATION"), "1");
-    env.insert(qSL("AM_SECURITY_TOKEN"), qL1S(securityToken().toHex()));
-    env.insert(qSL("AM_DBUS_PEER_ADDRESS"), static_cast<NativeRuntimeManager *>(manager())->applicationInterfaceServer()->address());
-    env.insert(qSL("AM_RUNTIME_CONFIGURATION"), QString::fromUtf8(QtYaml::yamlFromVariantDocuments({ configuration() })));
-    env.insert(qSL("AM_RUNTIME_ADDITIONAL_CONFIGURATION"), QString::fromUtf8(QtYaml::yamlFromVariantDocuments({ additionalConfiguration() })));
-    env.insert(qSL("AM_BASE_DIR"), QDir::currentPath());
+    QVariantMap dbusConfig = {
+        { qSL("p2p"), applicationInterfaceServer()->address() },
+        { qSL("org.freedesktop.Notifications"), NotificationManager::instance()->property("_am_dbus_name").toString()}
+    };
+
+    QVariantMap loggingConfig = {
+        { qSL("dlt"), Logging::isDltEnabled() },
+        { qSL("rules"), Logging::filterRules() }
+    };
+
+    QVariantMap uiConfig;
+    if (m_slowAnimations)
+        uiConfig.insert(qSL("slowAnimations"), true);
+    QVariantMap openGLConfig = m_app->openGLConfiguration();
+    if (openGLConfig.isEmpty())
+        openGLConfig = manager()->systemOpenGLConfiguration();
+    if (!openGLConfig.isEmpty())
+        uiConfig.insert(qSL("opengl"), openGLConfig);
+
+    QVariantMap config = {
+        { qSL("logging"), loggingConfig },
+        { qSL("baseDir"), QDir::currentPath() },
+        { qSL("runtimeConfiguration"), configuration() },
+        { qSL("securityToken"), qL1S(securityToken().toHex()) },
+        { qSL("dbus"), dbusConfig }
+    };
+
+    if (!m_needsLauncher && !m_isQuickLauncher)
+        config.insert(qSL("systemProperties"), systemProperties());
+    if (!uiConfig.isEmpty())
+        config.insert(qSL("ui"), uiConfig);
+
+    QMap<QString, QString> env = {
+        { qSL("QT_QPA_PLATFORM"), qSL("wayland") },
+        { qSL("QT_IM_MODULE"), QString() },     // Applications should use wayland text input
+        { qSL("QT_SCALE_FACTOR"), QString() },  // do not scale wayland clients
+        { qSL("AM_CONFIG"), QString::fromUtf8(QtYaml::yamlFromVariantDocuments({ config })) },
+    };
+
+    if (Logging::isDltEnabled()) {
+        // sadly we still need this, since we need to disable DLT as soon as possible
+        env.insert(qSL("AM_NO_DLT_LOGGING"), qSL("1"));
+    }
 
     for (QMapIterator<QString, QVariant> it(configuration().value(qSL("environmentVariables")).toMap()); it.hasNext(); ) {
         it.next();
-        QString name = it.key();
-        if (!name.isEmpty()) {
-            QString value = it.value().toString();
-            if (value.isEmpty())
-                env.remove(it.key());
-            else
-                env.insert(name, value);
+        if (!it.key().isEmpty())
+            env.insert(it.key(), it.value().toString());
+    }
+
+    if (m_app && !m_app->environmentVariables().isEmpty()) {
+        if (ApplicationManager::instance()->securityChecksEnabled()) {
+            qCWarning(LogSystem) << "Due to enabled security checks, the environmentVariables for"
+                                 << m_app->id() << "(given in info.yaml) will be ignored";
+        } else {
+            for (QMapIterator<QString, QVariant> it(m_app->environmentVariables()); it.hasNext(); ) {
+                it.next();
+                if (!it.key().isEmpty())
+                    env.insert(it.key(), it.value().toString());
+            }
         }
     }
 
@@ -224,8 +350,10 @@ bool NativeRuntime::start()
                      this, &NativeRuntime::onProcessError);
     QObject::connect(m_process, &AbstractContainerProcess::finished,
                      this, &NativeRuntime::onProcessFinished);
+    QObject::connect(ApplicationIPCManager::instance(), &ApplicationIPCManager::interfaceCreated,
+                     this, &NativeRuntime::registerExtensionInterfaces);
 
-    emit stateChanged(state());
+    setState(Startup);
     return true;
 }
 
@@ -234,14 +362,14 @@ void NativeRuntime::stop(bool forceKill)
     if (!m_process)
         return;
 
-    m_shutingDown = true;
-
+    setState(Shutdown);
     emit aboutToStop();
-    emit stateChanged(state());
 
-    if (forceKill) {
+    if (!m_applicationInterfaceConnected) {
+        //The launcher didn't connected to the RuntimeInterface yet, so we it won't get the quit signal
+        m_process->terminate();
+    } else if (forceKill) {
         m_process->kill();
-        deleteLater();
     } else {
         bool ok;
         int qt = configuration().value(qSL("quitTime")).toInt(&ok);
@@ -249,21 +377,20 @@ void NativeRuntime::stop(bool forceKill)
             qt = 250;
         QTimer::singleShot(qt, this, [this]() {
             m_process->terminate();
-            deleteLater();
         });
     }
 }
 
 void NativeRuntime::onProcessStarted()
 {
-    m_started = true;
-    emit stateChanged(state());
+    if (!m_needsLauncher && !application()->supportsApplicationInterface())
+        setState(Active);
 }
 
 void NativeRuntime::onProcessError(QProcess::ProcessError error)
 {
     Q_UNUSED(error)
-    if (!m_started)
+    if (m_state != Active && m_state != Shutdown)
         shutdown(-1, QProcess::CrashExit);
 }
 
@@ -290,8 +417,12 @@ void NativeRuntime::onDBusPeerConnection(const QDBusConnection &connection)
     QDBusConnection::sessionBus().registerObject(qSL("/Application%1/ApplicationInterface").arg(applicationProcessId()),
                                                  m_applicationInterface, QDBusConnection::ExportScriptableContents);
 #endif
+    // we need to delay the actual start call, until the launcher side is ready to
+    // listen to the interface
+    connect(m_applicationInterface, &NativeRuntimeApplicationInterface::applicationFinishedInitialization,
+            this, &NativeRuntime::onApplicationFinishedInitialization);
 
-    if (m_needsLauncher && m_launchWhenReady && !m_launched) {
+    if (m_needsLauncher && m_launchWhenReady && !m_applicationInterfaceConnected) {
         m_runtimeInterface = new NativeRuntimeInterface(this);
         if (!conn.registerObject(qSL("/RuntimeInterface"), m_runtimeInterface, QDBusConnection::ExportScriptableContents))
             qCWarning(LogSystem) << "ERROR: could not register the /RuntimeInterface object on the peer DBus.";
@@ -300,10 +431,6 @@ void NativeRuntime::onDBusPeerConnection(const QDBusConnection &connection)
         QDBusConnection::sessionBus().registerObject(qSL("/Application%1/RuntimeInterface").arg(applicationProcessId()),
                                                      m_runtimeInterface, QDBusConnection::ExportScriptableContents);
 #endif
-        // we need to delay the actual start call, until the launcher side is ready to
-        // listen to the interface
-        connect(m_runtimeInterface, &NativeRuntimeInterface::launcherFinishedInitialization,
-                this, &NativeRuntime::onLauncherFinishedInitialization);
     }
 
     // interface availability is dependent on the actual app and we don't
@@ -312,54 +439,50 @@ void NativeRuntime::onDBusPeerConnection(const QDBusConnection &connection)
         registerExtensionInterfaces();
 }
 
-void NativeRuntime::onLauncherFinishedInitialization()
+void NativeRuntime::onApplicationFinishedInitialization()
 {
-    if (m_needsLauncher && m_launchWhenReady && !m_launched && m_app && m_runtimeInterface) {
+    if (m_needsLauncher && m_launchWhenReady && !m_applicationInterfaceConnected && m_app && m_runtimeInterface) {
         registerExtensionInterfaces();
 
-        QString baseDir = m_container->mapHostPathToContainer(m_app->baseDir().absolutePath());
+        QString baseDir = m_container->mapHostPathToContainer(m_app->codeDir());
         QString pathInContainer = m_container->mapHostPathToContainer(m_app->absoluteCodeFilePath());
-        m_runtimeInterface->startApplication(baseDir, pathInContainer, m_document, m_app->toVariantMap());
-        m_launched = true;
+
+        emit m_runtimeInterface->startApplication(baseDir, pathInContainer, m_document, m_mimeType,
+                                                  convertFromJSVariant(QVariant(m_app->toVariantMap())).toMap(),
+                                                  convertFromJSVariant(QVariant(systemProperties())).toMap());
+        m_applicationInterfaceConnected = true;
     }
+
+    setState(Active);
 }
 
 void NativeRuntime::registerExtensionInterfaces()
 {
     if (!m_dbusConnection)
         return;
-    if (m_registeredExtensionInterfaces)
-        return;
+
     if (!application())
         return;
 
     QDBusConnection conn(m_dbusConnectionName);
 
     // register all extension interfaces
-    foreach (ApplicationIPCInterface *iface, ApplicationIPCManager::instance()->interfaces()) {
-        if (!iface->isValidForApplication(application()))
+    const auto interfaces = ApplicationIPCManager::instance()->interfaces();
+    for (ApplicationIPCInterface *iface : interfaces) {
+        if (!iface->isValidForApplication(application()) || m_applicationIPCInterfaces.contains(iface))
             continue;
 
         if (!iface->dbusRegister(application(), conn)) {
             qCWarning(LogSystem) << "ERROR: could not register the application IPC interface" << iface->interfaceName()
                                  << "at" << iface->pathName() << "on the peer DBus:" << conn.lastError().name() << conn.lastError().message();
+        } else {
+            m_applicationIPCInterfaces.append(iface);
+            emit interfaceCreated(iface->interfaceName());
         }
 #ifdef EXPORT_P2PBUS_OBJECTS_TO_SESSION_BUS
         iface->dbusRegister(application(), QDBusConnection::sessionBus());
 #endif
     }
-    m_registeredExtensionInterfaces = true;
-}
-
-AbstractRuntime::State NativeRuntime::state() const
-{
-    if (m_process) {
-        if (m_process->state() == QProcess::Starting)
-            return Startup;
-        if (m_process->state() == QProcess::Running)
-            return m_shutingDown ? Shutdown : Active;
-    }
-    return Inactive;
 }
 
 qint64 NativeRuntime::applicationProcessId() const
@@ -367,13 +490,22 @@ qint64 NativeRuntime::applicationProcessId() const
     return m_process ? m_process->processId() : 0;
 }
 
-void NativeRuntime::openDocument(const QString &document)
+void NativeRuntime::openDocument(const QString &document, const QString &mimeType)
 {
    m_document = document;
+   m_mimeType = mimeType;
    if (m_applicationInterface)
-       m_applicationInterface->openDocument(document);
+       emit m_applicationInterface->openDocument(document, mimeType);
 }
 
+void NativeRuntime::setSlowAnimations(bool slow)
+{
+    if (m_slowAnimations != slow) {
+        m_slowAnimations = slow;
+        if (m_applicationInterface)
+            emit m_applicationInterface->slowAnimationsChanged(slow);
+    }
+}
 
 NativeRuntimeApplicationInterface::NativeRuntimeApplicationInterface(NativeRuntime *runtime)
     : ApplicationInterface(runtime)
@@ -381,10 +513,17 @@ NativeRuntimeApplicationInterface::NativeRuntimeApplicationInterface(NativeRunti
 {
     connect(ApplicationManager::instance(), &ApplicationManager::memoryLowWarning,
             this, &ApplicationInterface::memoryLowWarning);
+    connect(ApplicationManager::instance(), &ApplicationManager::memoryCriticalWarning,
+            this, &ApplicationInterface::memoryCriticalWarning);
+    connect(runtime->container(), &AbstractContainer::memoryLowWarning,
+            this, &ApplicationInterface::memoryLowWarning);
+    connect(runtime->container(), &AbstractContainer::memoryCriticalWarning,
+            this, &ApplicationInterface::memoryCriticalWarning);
     connect(runtime, &NativeRuntime::aboutToStop,
             this, &ApplicationInterface::quit);
+    connect(runtime, &NativeRuntime::interfaceCreated,
+                     this, &ApplicationInterface::interfaceCreated);
 }
-
 
 QString NativeRuntimeApplicationInterface::applicationId() const
 {
@@ -393,22 +532,44 @@ QString NativeRuntimeApplicationInterface::applicationId() const
     return QString();
 }
 
-QVariantMap NativeRuntimeApplicationInterface::additionalConfiguration() const
+QVariantMap NativeRuntimeApplicationInterface::name() const
+{
+    return QVariantMap();    // only provided to QML apps currently
+}
+
+QUrl NativeRuntimeApplicationInterface::icon() const
+{
+    return QUrl();    // only provided to QML apps currently
+}
+
+QString NativeRuntimeApplicationInterface::version() const
+{
+    return QString();    // only provided to QML apps currently
+}
+
+QVariantMap NativeRuntimeApplicationInterface::systemProperties() const
 {
     if (m_runtime)
-        return m_runtime->additionalConfiguration();
+        return m_runtime->systemProperties();
     return QVariantMap();
+}
+
+QVariantMap NativeRuntimeApplicationInterface::applicationProperties() const
+{
+    if (m_runtime && m_runtime->application())
+        return m_runtime->application()->allAppProperties();
+    return QVariantMap();
+}
+
+void NativeRuntimeApplicationInterface::finishedInitialization()
+{
+    emit applicationFinishedInitialization();
 }
 
 NativeRuntimeInterface::NativeRuntimeInterface(NativeRuntime *runtime)
     : QObject(runtime)
     , m_runtime(runtime)
 { }
-
-void NativeRuntimeInterface::finishedInitialization()
-{
-    emit launcherFinishedInitialization();
-}
 
 
 NativeRuntimeManager::NativeRuntimeManager(QObject *parent)
@@ -417,50 +578,7 @@ NativeRuntimeManager::NativeRuntimeManager(QObject *parent)
 
 NativeRuntimeManager::NativeRuntimeManager(const QString &id, QObject *parent)
     : AbstractRuntimeManager(id, parent)
-    , m_applicationInterfaceServer(new QDBusServer(qSL("unix:tmpdir=/tmp")))
-{
-    connect(m_applicationInterfaceServer, &QDBusServer::newConnection,
-            this, [this](const QDBusConnection &connection) {
-        // If multiple apps are starting in parallel, there will be multiple NativeRuntime objects
-        // listening to the newConnection signal from the one and only DBusServer.
-        // We have to make sure to forward to the correct runtime object while also handling
-        // error conditions.
-
-        qint64 pid = getDBusPeerPid(connection);
-        if (pid <= 0) {
-            QDBusConnection::disconnectFromPeer(connection.name());
-            qCWarning(LogSystem) << "Could not retrieve peer pid on D-Bus connection attempt.";
-            return;
-        }
-
-        // try direct PID mapping first
-        for (NativeRuntime *rt : qAsConst(m_nativeRuntimes)) {
-            if (rt->applicationProcessId() == pid) {
-                rt->onDBusPeerConnection(connection);
-                return;
-            }
-        }
-
-        // check for sub-processes ... this happens when running the app via gdbserver
-        qint64 appmanPid = getpid();
-
-        for (NativeRuntime *rt : qAsConst(m_nativeRuntimes)) {
-            qint64 ppid = pid;
-
-            while (ppid > 1 && ppid != appmanPid) {
-                ppid = getParentPid(ppid);
-
-                if (rt->applicationProcessId() == ppid) {
-                    rt->onDBusPeerConnection(connection);
-                    return;
-                }
-            }
-        }
-
-        QDBusConnection::disconnectFromPeer(connection.name());
-        qCWarning(LogSystem) << "Connection attempt on peer D-Bus from unknown pid:" << pid;
-    });
-}
+{ }
 
 QString NativeRuntimeManager::defaultIdentifier()
 {
@@ -479,16 +597,7 @@ AbstractRuntime *NativeRuntimeManager::create(AbstractContainer *container, cons
     QScopedPointer<NativeRuntime> nrt(new NativeRuntime(container, app, this));
     if (!nrt || !nrt->initialize())
         return nullptr;
-    connect(nrt.data(), &QObject::destroyed, this, [this](QObject *o) {
-        m_nativeRuntimes.removeOne(static_cast<NativeRuntime *>(o));
-    });
-    m_nativeRuntimes.append(nrt.data());
     return nrt.take();
-}
-
-QDBusServer *NativeRuntimeManager::applicationInterfaceServer() const
-{
-    return m_applicationInterfaceServer;
 }
 
 QT_END_NAMESPACE_AM

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -43,6 +43,7 @@
 #include <QDir>
 #include <QUuid>
 
+#include "logging.h"
 #include "application.h"
 #include "applicationinstaller.h"
 #include "applicationinstaller_p.h"
@@ -55,17 +56,6 @@
 #include "qml-utilities.h"
 #include "applicationmanager.h"
 
-
-#define AM_AUTHENTICATE_DBUS(RETURN_TYPE) \
-    do { \
-        if (!checkDBusPolicy(this, d->dbusPolicy, __FUNCTION__, [](qint64 pid) -> QStringList { return ApplicationManager::instance()->capabilities(ApplicationManager::instance()->identifyApplication(pid)); })) \
-            return RETURN_TYPE(); \
-    } while (false);
-
-/*!
-    \class ApplicationInstaller
-    \internal
-*/
 
 /*!
     \qmltype ApplicationInstaller
@@ -85,40 +75,40 @@
         \li Task State
         \li Description
     \row
-        \li \c queued
+        \li \c Queued
         \li The task was created and is now queued up for execution.
     \row
-        \li \c executing
+        \li \c Executing
         \li The task is being executed.
     \row
-        \li \c finished
+        \li \c Finished
         \li The task was executed successfully.
     \row
-        \li \c failed
+        \li \c Failed
         \li The task failed to execute successfully.
     \row
-        \li \c awaitingAcknowledge
+        \li \c AwaitingAcknowledge
         \li \e{Installation tasks only!} The task is currently halted, waiting for either
             acknowledgePackageInstallation() or cancelTask() to continue. See startPackageInstallation()
             for more information on the installation workflow.
     \row
-        \li \c installing
+        \li \c Installing
         \li \e{Installation tasks only!} The installation was acknowledged via acknowledgePackageInstallation()
             and the final installation phase is now running.
     \row
-        \li \c cleaningUp
+        \li \c CleaningUp
         \li \e{Installation tasks only!} The installation has finished, and previous installations as
             well as temporary files are being cleaned up.
     \endtable
 
-    The normal workflow for tasks is: \c queued \unicode{0x2192} \c active \unicode{0x2192} \c
-    finished. The task can enter the \c failed state at any point though - either by being canceled via
+    The normal workflow for tasks is: \c Queued \unicode{0x2192} \c Executing \unicode{0x2192} \c
+    Finished. The task can enter the \c Failed state at any point though - either by being canceled via
     cancelTask() or simply by failing due to an error.
 
-    Installation tasks are a bit more complex due to the acknowledgment: \c queued \unicode{0x2192}
-    \c executing \unicode{0x2192} \c awaitingAcknowledge (this state may be skipped if
-    acknowledgePackageInstallation() was called already) \unicode{0x2192} \c installing
-    \unicode{0x2192} \c cleanup \unicode{0x2192} \c finished. Again, the task can fail at any point.
+    Installation tasks are a bit more complex due to the acknowledgment: \c Queued \unicode{0x2192}
+    \c Executing \unicode{0x2192} \c AwaitingAcknowledge (this state may be skipped if
+    acknowledgePackageInstallation() was called already) \unicode{0x2192} \c Installing
+    \unicode{0x2192} \c Cleanup \unicode{0x2192} \c Finished. Again, the task can fail at any point.
 */
 
 // THIS IS MISSING AN EXAMPLE!
@@ -135,7 +125,7 @@
 /*!
     \qmlsignal ApplicationInstaller::taskStarted(string taskId)
 
-    This signal is emitted when the task identified by \a taskId enters the \c active state.
+    This signal is emitted when the task identified by \a taskId enters the \c Executing state.
 
     \sa taskStateChanged()
 */
@@ -143,7 +133,7 @@
 /*!
     \qmlsignal ApplicationInstaller::taskFinished(string taskId)
 
-    This signal is emitted when the task identified by \a taskId enters the \c finished state.
+    This signal is emitted when the task identified by \a taskId enters the \c Finished state.
 
     \sa taskStateChanged()
 */
@@ -151,7 +141,7 @@
 /*!
     \qmlsignal ApplicationInstaller::taskFailed(string taskId)
 
-    This signal is emitted when the task identified by \a taskId enters the \c failed state.
+    This signal is emitted when the task identified by \a taskId enters the \c Failed state.
 
     \sa taskStateChanged()
 */
@@ -160,14 +150,18 @@
     \qmlsignal ApplicationInstaller::taskRequestingInstallationAcknowledge(string taskId, object application)
 
     This signal is emitted when the installation task identified by \a taskId has received enough
-    meta-data to be able to emit this signal. The task may be in either \c executing or \c
-    awaitingAcknowledge state.
+    meta-data to be able to emit this signal. The task may be in either \c Executing or \c
+    AwaitingAcknowledge state.
 
     The contents of the package's manifest file are supplied via \a application as a JavaScript object.
     Please see the \l {ApplicationManager Roles}{role names} for the expected object fields.
 
     Following this signal, either cancelTask() or acknowledgePackageInstallation() has to be called
     for this \a taskId, to either cancel the installation or try to complete it.
+
+    The ApplicationInstaller has two convenience functions to help the System-UI with verifying the
+    meta-data: versionCompare() and, in case you are using reverse-DNS notation for application-ids,
+    validateDnsName().
 
     \sa taskStateChanged(), startPackageInstallation()
 */
@@ -192,7 +186,7 @@
 
 QT_BEGIN_NAMESPACE_AM
 
-ApplicationInstaller *ApplicationInstaller::s_instance = 0;
+ApplicationInstaller *ApplicationInstaller::s_instance = nullptr;
 
 ApplicationInstaller::ApplicationInstaller(const QVector<InstallationLocation> &installationLocations,
                                            const QDir &manifestDir, const QDir &imageMountDir,
@@ -217,6 +211,7 @@ ApplicationInstaller *ApplicationInstaller::createInstance(const QVector<Install
         qFatal("ApplicationInstaller::createInstance() was called a second time.");
 
     qRegisterMetaType<AsynchronousTask *>();
+    qRegisterMetaType<AsynchronousTask::TaskState>();
 
     if (Q_UNLIKELY(!manifestDir.exists())) {
         if (error)
@@ -290,7 +285,7 @@ bool ApplicationInstaller::enableApplicationUserIdSeparation(uint minUserId, uin
     return true;
 }
 
-uint ApplicationInstaller::findUnusedUserId() const throw(Exception)
+uint ApplicationInstaller::findUnusedUserId() const Q_DECL_NOEXCEPT_EXPR(false)
 {
     if (!isApplicationUserIdSeparationEnabled())
         return uint(-1);
@@ -299,7 +294,7 @@ uint ApplicationInstaller::findUnusedUserId() const throw(Exception)
 
     for (uint uid = d->minUserId; uid <= d->maxUserId; ++uid) {
         bool match = false;
-        foreach (const Application *app, apps) {
+        for (const Application *app : qAsConst(apps)) {
             if (app->uid() == uid) {
                 match = true;
                 break;
@@ -308,7 +303,7 @@ uint ApplicationInstaller::findUnusedUserId() const throw(Exception)
         if (!match)
             return uid;
     }
-    throw Exception(Error::System, "could not find a free user-id for application separation in the range %1 to %2")
+    throw Exception("could not find a free user-id for application separation in the range %1 to %2")
             .arg(d->minUserId).arg(d->maxUserId);
 }
 
@@ -322,25 +317,6 @@ QDir ApplicationInstaller::applicationImageMountDirectory() const
     return d->imageMountDir;
 }
 
-bool ApplicationInstaller::setDBusPolicy(const QVariantMap &yamlFragment)
-{
-    static const QVector<QByteArray> functions {
-        QT_STRINGIFY(startPackageInstallation),
-        QT_STRINGIFY(acknowledgePackageInstallation),
-        QT_STRINGIFY(removePackage),
-        QT_STRINGIFY(taskState),
-        QT_STRINGIFY(cancelTask)
-    };
-
-    d->dbusPolicy = parseDBusPolicy(yamlFragment);
-
-    for (auto it = d->dbusPolicy.cbegin(); it != d->dbusPolicy.cend(); ++it) {
-       if (!functions.contains(it.key()))
-           return false;
-    }
-    return true;
-}
-
 QList<QByteArray> ApplicationInstaller::caCertificates() const
 {
     return d->chainOfTrust;
@@ -351,20 +327,23 @@ void ApplicationInstaller::setCACertificates(const QList<QByteArray> &chainOfTru
     d->chainOfTrust = chainOfTrust;
 }
 
-void ApplicationInstaller::cleanupBrokenInstallations() const throw(Exception)
+void ApplicationInstaller::cleanupBrokenInstallations() const Q_DECL_NOEXCEPT_EXPR(false)
 {
     // 1. find mounts and loopbacks left-over from a previous instance and kill them
 
     QMultiMap<QString, QString> mountPoints = mountedDirectories();
 
-    foreach (const QFileInfo &fi, applicationImageMountDirectory().entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot)) {
+    const QFileInfoList mounts = applicationImageMountDirectory().entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot);
+    for (const QFileInfo &fi : mounts) {
         QString path = fi.canonicalFilePath();
         QString device = mountPoints.value(path);
 
         if (!device.isEmpty()) {
+            qCDebug(LogInstaller) << "cleanup: trying to unmount stale application mount" << path;
+
             if (!SudoClient::instance()->unmount(path)) {
                 if (!SudoClient::instance()->unmount(path, true /*force*/))
-                    throw Exception(Error::System, "failed to un-mount stale mount %1 on %2: %3")
+                    throw Exception("failed to un-mount stale mount %1 on %2: %3")
                         .arg(device, path, SudoClient::instance()->lastError());
             }
             if (device.startsWith(qL1S("/dev/loop"))) {
@@ -388,19 +367,23 @@ void ApplicationInstaller::cleanupBrokenInstallations() const throw(Exception)
     QMultiMap<QString, QString> validPaths {
         { manifestDirectory().absolutePath(), QString() }
     };
-    foreach (const InstallationLocation &il, installationLocations()) {
+    for (const InstallationLocation &il : qAsConst(d->installationLocations)) {
         if (!il.isRemovable() || il.isMounted()) {
             validPaths.insert(il.documentPath(), QString());
             validPaths.insert(il.installationPath(), QString());
         }
     }
 
-    foreach (const Application *app, am->applications()) {
+    const auto allApps = am->applications();
+    for (const Application *app : allApps) {
         const InstallationReport *ir = app->installationReport();
         if (ir) {
             const InstallationLocation &il = installationLocationFromId(ir->installationLocationId());
 
             bool valid = il.isValid();
+
+            if (!valid)
+                qCDebug(LogInstaller) << "cleanup: uninstalling" << app->id() << "- installationLocation is invalid";
 
             if (valid && (!il.isRemovable() || il.isMounted())) {
                 QStringList checkDirs;
@@ -416,17 +399,19 @@ void ApplicationInstaller::cleanupBrokenInstallations() const throw(Exception)
                 else
                     checkDirs << il.installationPath() + app->id();
 
-                foreach (const QString &checkFile, checkFiles) {
+                for (const QString &checkFile : qAsConst(checkFiles)) {
                     QFileInfo fi(checkFile);
                     if (!fi.exists() || !fi.isFile() || !fi.isReadable()) {
                         valid = false;
+                        qCDebug(LogInstaller) << "cleanup: uninstalling" << app->id() << "- file missing:" << checkFile;
                         break;
                     }
                 }
-                foreach (const QString &checkDir, checkDirs) {
+                for (const QString &checkDir : checkDirs) {
                     QFileInfo fi(checkDir);
                     if (!fi.exists() || !fi.isDir() || !fi.isReadable()) {
                         valid = false;
+                        qCDebug(LogInstaller) << "cleanup: uninstalling" << app->id() << "- directory missing:" << checkDir;
                         break;
                     }
                 }
@@ -447,37 +432,34 @@ void ApplicationInstaller::cleanupBrokenInstallations() const throw(Exception)
                 }
                 throw Exception(Error::Package, "could not remove broken installation of app %1 from database").arg(app->id());
             }
-        } else {
-            // built-in, so make sure we do not kill the document directory
-            validPaths.insertMulti(defaultInstallationLocation().documentPath(), app->id() + qL1C('/'));
         }
     }
 
     // 3. Remove everything that is not referenced from the app-db
 
-    foreach (const QString &dir, validPaths.uniqueKeys()) {
-        foreach (const QFileInfo &fi, QDir(dir).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot)) {
+    for (auto it = validPaths.cbegin(); it != validPaths.cend(); ) {
+        const QString currentDir = it.key();
+
+        // collect all values for the unique key currentDir
+        QVector<QString> validNames;
+        for ( ; it != validPaths.cend() && it.key() == currentDir; ++it)
+            validNames << it.value();
+
+        const QFileInfoList &dirEntries = QDir(currentDir).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot);
+
+        // check if there is anything in the filesystem that is NOT listed in the validNames
+        for (const QFileInfo &fi : dirEntries) {
             QString name = fi.fileName();
-            QStringList validNames = validPaths.values(dir);
+            if (fi.isDir())
+                name.append(qL1C('/'));
 
-            if ((fi.isDir() && validNames.contains(name + qL1C('/')))
-                    || (fi.isFile() && validNames.contains(name))) {
-                continue;
+            if ((!fi.isDir() && !fi.isFile()) || !validNames.contains(name)) {
+                qCDebug(LogInstaller) << "cleanup: removing unreferenced inode" << name;
+
+                if (!SudoClient::instance()->removeRecursive(fi.absoluteFilePath()))
+                    throw Exception(Error::IO, "could not remove broken installation leftover %1 : %2").arg(fi.absoluteFilePath()).arg(SudoClient::instance()->lastError());
             }
-            if (!SudoClient::instance()->removeRecursive(fi.absoluteFilePath()))
-                throw Exception(Error::IO, "could not remove broken installation leftover %1 : %2").arg(fi.absoluteFilePath()).arg(SudoClient::instance()->lastError());
         }
-    }
-}
-
-bool ApplicationInstaller::checkCleanup()
-{
-    try {
-        cleanupBrokenInstallations();
-        return true;
-    } catch (const Exception &e) {
-        qCDebug(LogInstaller) << "CLEANUP: " << e.errorString();
-        return false;
     }
 }
 
@@ -506,7 +488,7 @@ const InstallationLocation &ApplicationInstaller::defaultInstallationLocation() 
 
 const InstallationLocation &ApplicationInstaller::installationLocationFromId(const QString &installationLocationId) const
 {
-    foreach (const InstallationLocation &il, d->installationLocations) {
+    for (const InstallationLocation &il : d->installationLocations) {
         if (il.id() == installationLocationId)
             return il;
     }
@@ -533,7 +515,7 @@ QStringList ApplicationInstaller::installationLocationIds() const
 {
     QStringList ids;
     ids.reserve(d->installationLocations.size());
-    foreach (const InstallationLocation &il, d->installationLocations)
+    for (const InstallationLocation &il : d->installationLocations)
         ids << il.id();
     return ids;
 }
@@ -567,7 +549,7 @@ QString ApplicationInstaller::installationLocationIdFromApplication(const QStrin
     \row
         \li \c id
         \li \c string
-        \li The installation location id that is used as the handle all other ApplicationInstaller
+        \li The installation location id that is used as the handle for all other ApplicationInstaller
             function calls. The \c id consists of the \c type and \c index field, concatenated by
             a single dash (for example, \c internal-0).
     \row
@@ -662,7 +644,6 @@ qint64 ApplicationInstaller::installedApplicationSize(const QString &id) const
 QString ApplicationInstaller::startPackageInstallation(const QString &installationLocationId, const QUrl &sourceUrl)
 {
     AM_TRACE(LogInstaller, installationLocationId, sourceUrl);
-    AM_AUTHENTICATE_DBUS(QString)
 
     const InstallationLocation &il = installationLocationFromId(installationLocationId);
 
@@ -711,7 +692,6 @@ QString ApplicationInstaller::startPackageInstallation(const QString &installati
 void ApplicationInstaller::acknowledgePackageInstallation(const QString &taskId)
 {
     AM_TRACE(LogInstaller, taskId)
-    AM_AUTHENTICATE_DBUS(void)
 
     auto allTasks = d->taskQueue;
     allTasks.append(d->activeTask);
@@ -744,7 +724,6 @@ void ApplicationInstaller::acknowledgePackageInstallation(const QString &taskId)
 QString ApplicationInstaller::removePackage(const QString &id, bool keepDocuments, bool force)
 {
     AM_TRACE(LogInstaller, id, keepDocuments)
-    AM_AUTHENTICATE_DBUS(QString)
 
     if (const Application *a = ApplicationManager::instance()->fromId(id)) {
         if (const InstallationReport *report = a->installationReport()) {
@@ -759,23 +738,43 @@ QString ApplicationInstaller::removePackage(const QString &id, bool keepDocument
 
 
 /*!
-    \qmlmethod string ApplicationInstaller::taskState(string taskId)
+    \qmlmethod enumeration ApplicationInstaller::taskState(string taskId)
 
-    Returns a string describing the current state of the installation task identified by \a taskId.
+    Returns the current state of the installation task identified by \a taskId.
     \l {TaskStates}{See here} for a list of valid task states.
 
-    Returns an empty string if the \a taskId is invalid.
+    Returns \c ApplicationInstaller.Invalid if the \a taskId is invalid.
 */
-QString ApplicationInstaller::taskState(const QString &taskId)
+AsynchronousTask::TaskState ApplicationInstaller::taskState(const QString &taskId)
 {
-    AM_AUTHENTICATE_DBUS(QString)
-
     auto allTasks = d->taskQueue;
     allTasks.append(d->activeTask);
 
     for (const AsynchronousTask *task : qAsConst(allTasks)) {
         if (task && (task->id() == taskId))
-            return AsynchronousTask::stateToString(task->state());
+            return task->state();
+    }
+    return AsynchronousTask::Invalid;
+}
+
+/*!
+    \qmlmethod string ApplicationInstaller::taskApplicationId(string taskId)
+
+    Returns the application id associated with the task identified by \a taskId. The task may not
+    have a valid application id at all times though and in this case the function will return an
+    empty string (this will be the case for installations before the taskRequestingInstallationAcknowledge
+    signal has been emitted).
+
+    Returns an empty string if the \a taskId is invalid.
+*/
+QString ApplicationInstaller::taskApplicationId(const QString &taskId)
+{
+    auto allTasks = d->taskQueue;
+    allTasks.append(d->activeTask);
+
+    for (const AsynchronousTask *task : qAsConst(allTasks)) {
+        if (task && (task->id() == taskId))
+            return task->applicationId();
     }
     return QString();
 }
@@ -790,12 +789,11 @@ QString ApplicationInstaller::taskState(const QString &taskId)
 bool ApplicationInstaller::cancelTask(const QString &taskId)
 {
     AM_TRACE(LogInstaller, taskId)
-    AM_AUTHENTICATE_DBUS(bool)
 
     if (d->activeTask && d->activeTask->id() == taskId)
         return d->activeTask->cancel();
 
-    foreach (AsynchronousTask *task, d->taskQueue) {
+    for (AsynchronousTask *task : qAsConst(d->taskQueue)) {
         if (task->id() == taskId) {
             task->forceCancel();
             task->deleteLater();
@@ -811,23 +809,108 @@ bool ApplicationInstaller::cancelTask(const QString &taskId)
 }
 
 /*!
-  \qmlmethod int ApplicationInstaller::compareVersions(string version1, string version2)
+    \qmlmethod int ApplicationInstaller::compareVersions(string version1, string version2)
 
-  Convenience method for app-store implementation for comparing version numbers, as the actual
-  version comparison algorithm is not trivial.
+    Convenience method for app-store implementations or taskRequestingInstallationAcknowledge()
+    callbacks for comparing version numbers, as the actual version comparison algorithm is not
+    trivial.
 
-  Returns \c -1, \c 0 or \c 1 if \a version1 is smaller than, equal to, or greater than \a version2
-  (similar to how \c strcmp() works).
+    Returns \c -1, \c 0 or \c 1 if \a version1 is smaller than, equal to, or greater than \a
+    version2 (similar to how \c strcmp() works).
 */
 int ApplicationInstaller::compareVersions(const QString &version1, const QString &version2)
 {
-    return versionCompare(version1, version2);
+    int pos1 = 0;
+    int pos2 = 0;
+    int len1 = version1.length();
+    int len2 = version2.length();
+
+    forever {
+        if (pos1 == len1 && pos2 == len2)
+            return 0;
+       else if (pos1 >= len1)
+            return -1;
+        else if (pos2 >= len2)
+            return +1;
+
+        QString part1 = version1.mid(pos1++, 1);
+        QString part2 = version2.mid(pos2++, 1);
+
+        bool isDigit1 = part1.at(0).isDigit();
+        bool isDigit2 = part2.at(0).isDigit();
+
+        if (!isDigit1 || !isDigit2) {
+            int cmp = part1.compare(part2);
+            if (cmp)
+                return (cmp > 0) ? 1 : -1;
+        } else {
+            while ((pos1 < len1) && version1.at(pos1).isDigit())
+                part1.append(version1.at(pos1++));
+            while ((pos2 < len2) && version2.at(pos2).isDigit())
+                part2.append(version2.at(pos2++));
+
+            int num1 = part1.toInt();
+            int num2 = part2.toInt();
+
+            if (num1 != num2)
+                return (num1 > num2) ? 1 : -1;
+        }
+    }
+}
+
+/*!
+    \qmlmethod int ApplicationInstaller::validateDnsName(string name, int minimalPartCount)
+
+    Convenience method for app-store implementations or taskRequestingInstallationAcknowledge()
+    callbacks for checking if the given \a name is a valid DNS (or reverse-DNS) name according to
+    RFC 1035/1123. If the optional parameter \a minimalPartCount is specified, this function will
+    also check if \a name contains at least this amount of parts/sub-domains.
+
+    Returns \c true if the name is a valid DNS name or \c false otherwise.
+*/
+bool ApplicationInstaller::validateDnsName(const QString &name, int minimalPartCount)
+{
+    try {
+        // check if we have enough parts: e.g. "tld.company.app" would have 3 parts
+        QStringList parts = name.split('.');
+        if (parts.size() < minimalPartCount)
+            throw Exception(Error::Parse, "the minimum amount of parts (subdomains) is 3 (found %1)").arg(parts.size());
+
+        // standard RFC compliance tests (RFC 1035/1123)
+
+        auto partCheck = [](const QString &part) {
+            int len = part.length();
+
+            if (len < 1 || len > 63)
+                throw Exception(Error::Parse, "domain parts must consist of at least 1 and at most 63 characters (found %2 characters)").arg(len);
+
+            for (int pos = 0; pos < len; ++pos) {
+                ushort ch = part.at(pos).unicode();
+                bool isFirst = (pos == 0);
+                bool isLast  = (pos == (len - 1));
+                bool isDash  = (ch == '-');
+                bool isDigit = (ch >= '0' && ch <= '9');
+                bool isLower = (ch >= 'a' && ch <= 'z');
+
+                if ((isFirst || isLast || !isDash) && !isDigit && !isLower)
+                    throw Exception(Error::Parse, "domain parts must consist of only the characters '0-9', 'a-z', and '-' (which cannot be the first or last character)");
+            }
+        };
+
+        for (const QString &part : parts)
+            partCheck(part);
+
+        return true;
+    } catch (const Exception &e) {
+        qCDebug(LogInstaller).noquote() << "validateDnsName failed:" << e.errorString();
+        return false;
+    }
 }
 
 
 // this is a simple helper class - we need this to be able to run the filesystem (un)mounting
 // in a separate thread to avoid blocking the UI and D-Bus
-class ActivationHelper : public QObject
+class ActivationHelper : public QObject // clazy:exclude=missing-qobject-macro
 {
 public:
     enum Mode { Activate, Deactivate, IsActivated };
@@ -917,14 +1000,14 @@ public:
         try {
             QFileInfo fi(mountDir);
             if (!fi.isDir() && !QDir(fi.absolutePath()).mkpath(fi.fileName()))
-                throw Exception(Error::System, "could not create mountpoint directory %1").arg(mountDir);
+                throw Exception("could not create mountpoint directory %1").arg(mountDir);
 
             m_mountedDevice = root->attachLoopback(m_imageName, true /*ro*/);
             if (m_mountedDevice.isEmpty())
-                throw Exception(Error::System, "could not create a new loopback device: %1").arg(root->lastError());
+                throw Exception("could not create a new loopback device: %1").arg(root->lastError());
 
             if (!root->mount(m_mountedDevice, mountDir, true /*ro*/))
-                throw Exception(Error::System, "could not mount application image %1 to %2: %3").arg(mountDir, m_mountedDevice, root->lastError());
+                throw Exception("could not mount application image %1 to %2: %3").arg(mountDir, m_mountedDevice, root->lastError());
             m_mountPoint = mountDir;
 
             // better be safe than sorry - make sure this is the exact same version we installed
@@ -937,7 +1020,7 @@ public:
                     || !manifest1.open(QFile::ReadOnly)
                     || !manifest2.open(QFile::ReadOnly)
                     || (manifest1.readAll() != manifest2.readAll())) {
-                throw Exception(Error::System, "the info.yaml files in the manifest directory and within the application image do not match");
+                throw Exception("the info.yaml files in the manifest directory and within the application image do not match");
             }
             return true;
         } catch (const Exception &e) {
@@ -955,15 +1038,15 @@ public:
 
         try {
             if (!m_mountPoint.isEmpty() && !root->unmount(m_mountPoint))
-                throw Exception(Error::System, "could not unmount the application image at %1: %2").arg(m_mountPoint, root->lastError());
+                throw Exception("could not unmount the application image at %1: %2").arg(m_mountPoint, root->lastError());
 
             if (!m_mountedDevice.isEmpty() && !root->detachLoopback(m_mountedDevice))
-                throw Exception(Error::System, "could not remove loopback device %1: %2").arg(m_mountedDevice, root->lastError());
+                throw Exception("could not remove loopback device %1: %2").arg(m_mountedDevice, root->lastError());
 
             // m_mountPoint is only set, if the image is/was actually mounted
             QString mountDir = m_imageMountDir.filePath(m_applicationId);
             if (QFileInfo(mountDir).isDir() && !m_imageMountDir.rmdir(m_applicationId))
-                throw Exception(Error::System, "could not remove mount-point directory %1").arg(mountDir);
+                throw Exception("could not remove mount-point directory %1").arg(mountDir);
 
             return true;
         } catch (const Exception &e) {
@@ -1040,8 +1123,8 @@ void ApplicationInstaller::executeNextTask()
         emit taskStarted(task->id());
     });
 
-    connect(task, &AsynchronousTask::stateChanged, this, [this, task](AsynchronousTask::State newState) {
-        emit taskStateChanged(task->id(), AsynchronousTask::stateToString(newState));
+    connect(task, &AsynchronousTask::stateChanged, this, [this, task](AsynchronousTask::TaskState newState) {
+        emit taskStateChanged(task->id(), newState);
     });
 
     connect(task, &AsynchronousTask::progress, this, [this, task](qreal p) {
@@ -1064,7 +1147,7 @@ void ApplicationInstaller::executeNextTask()
         }
 
         if (d->activeTask == task)
-            d->activeTask = 0;
+            d->activeTask = nullptr;
 
         //task->deleteLater();
         delete task;
@@ -1096,7 +1179,7 @@ bool removeRecursiveHelper(const QString &path)
     if (ApplicationInstaller::instance()->isApplicationUserIdSeparationEnabled() && SudoClient::instance())
         return SudoClient::instance()->removeRecursive(path);
     else
-        return recursiveOperation(path, SafeRemove());
+        return recursiveOperation(path, safeRemove);
 }
 
 QT_END_NAMESPACE_AM

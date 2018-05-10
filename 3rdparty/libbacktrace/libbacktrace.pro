@@ -1,5 +1,6 @@
 requires(linux)
 
+TEMPLATE = lib
 TARGET = qtbacktrace
 
 load(am-config)
@@ -9,6 +10,8 @@ CONFIG += \
     hide_symbols \
     exceptions_off rtti_off warn_off \
     installed
+
+MODULE_INCLUDEPATH += $$PWD
 
 load(qt_helper_lib)
 

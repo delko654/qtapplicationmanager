@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -76,6 +76,7 @@ Rectangle {
 
             Image {
                 source: icon
+                opacity: isRunning ? 0.3 : 1.0
 
                 MouseArea {
                     anchors.fill: parent
@@ -85,7 +86,7 @@ Rectangle {
         }
     }
 
-    // System UI chrome for applications
+    // System-UI chrome for applications
     Repeater {
         id: windows
         model: menuItems.model
@@ -130,7 +131,7 @@ Rectangle {
         }
     }
 
-    // System UI for a pop-up and notification
+    // System-UI for a pop-up and notification
     Item {
         id: popUpContainer
         z: 30000
@@ -159,7 +160,6 @@ Rectangle {
                     console.log("Allowing a single app started outside of appman instead of App1 ...");
                     appIndex = 0;
                 }
-                menuItems.itemAt(appIndex).opacity = 0.3;
                 var chrome = windows.itemAt(appIndex);
                 window.parent = chrome.appContainer;
                 window.anchors.fill = chrome.appContainer;
@@ -181,7 +181,6 @@ Rectangle {
                 if (appIndex === -1)
                     appIndex = 0;
                 windows.itemAt(appIndex).visible = false;
-                menuItems.itemAt(appIndex).opacity = 1.0;
             }
         }
 

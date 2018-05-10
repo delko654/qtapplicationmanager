@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -43,13 +43,16 @@
 #include <QQmlContext>
 #include <QQmlComponent>
 #include <QCoreApplication>
+#include <QTimer>
 
 #if !defined(AM_HEADLESS)
 #  include <QQuickView>
 
 #  include "fakeapplicationmanagerwindow.h"
+#  include "inprocesssurfaceitem.h"
 #endif
 
+#include "logging.h"
 #include "application.h"
 #include "qmlinprocessruntime.h"
 #include "qmlinprocessapplicationinterface.h"
@@ -57,37 +60,16 @@
 #include "global.h"
 #include "utilities.h"
 #include "runtimefactory.h"
+#include "qml-utilities.h"
+
+#if defined(Q_OS_UNIX)
+#  include <signal.h>
+#endif
 
 QT_BEGIN_NAMESPACE_AM
 
-// copied straight from Qt 5.1.0 qmlscene/main.cpp for now - needs to be revised
-static void loadDummyDataFiles(QQmlEngine &engine, const QString& directory)
-{
-    QDir dir(directory + qSL("/dummydata"), qSL("*.qml"));
-    QStringList list = dir.entryList();
-    for (int i = 0; i < list.size(); ++i) {
-        QString qml = list.at(i);
-        QFile f(dir.filePath(qml));
-        f.open(QIODevice::ReadOnly);
-        QByteArray data = f.readAll();
-        QQmlComponent comp(&engine);
-        comp.setData(data, QUrl());
-        QObject *dummyData = comp.create();
 
-        if (comp.isError()) {
-            QList<QQmlError> errors = comp.errors();
-            foreach (const QQmlError &error, errors)
-                qWarning() << error;
-        }
-
-        if (dummyData) {
-            qWarning() << "Loaded dummy data:" << dir.filePath(qml);
-            qml.truncate(qml.length()-4);
-            engine.rootContext()->setContextProperty(qml, dummyData);
-            dummyData->setParent(&engine);
-        }
-    }
-}
+const char *QmlInProcessRuntime::s_runtimeKey = "_am_runtime";
 
 
 QmlInProcessRuntime::QmlInProcessRuntime(const Application *app, QmlInProcessRuntimeManager *manager)
@@ -99,19 +81,17 @@ QmlInProcessRuntime::~QmlInProcessRuntime()
 #if !defined(AM_HEADLESS)
     // if there is still a window present at this point, fire the 'closing' signal (probably) again,
     // because it's still the duty of WindowManager together with qml-ui to free and delete this item!!
-    for (int i = m_windows.size(); i; --i)
-        emit inProcessSurfaceItemClosing(m_windows.at(i-1));
+    for (int i = m_surfaces.size(); i; --i)
+        emit inProcessSurfaceItemClosing(m_surfaces.at(i-1));
 #endif
 }
 
 bool QmlInProcessRuntime::start()
 {
 #if !defined(AM_HEADLESS)
-    if (m_mainWindow) {                                 // if there is already a window present, just emit ready signal and return true (=="start successful")
-        emit inProcessSurfaceItemReady(m_mainWindow);
-        return true;
-    }
+    Q_ASSERT(!m_rootObject);
 #endif
+    setState(Startup);
 
     if (!m_inProcessQmlEngine)
         return false;
@@ -123,23 +103,24 @@ bool QmlInProcessRuntime::start()
 
     if (m_app->runtimeParameters().value(qSL("loadDummyData")).toBool()) {
         qCDebug(LogSystem) << "Loading dummy-data";
-        loadDummyDataFiles(*m_inProcessQmlEngine, QFileInfo(m_app->absoluteCodeFilePath()).path());
+        loadQmlDummyDataFiles(m_inProcessQmlEngine, QFileInfo(m_app->absoluteCodeFilePath()).path());
     }
 
     const QStringList importPaths = variantToStringList(configuration().value(qSL("importPaths")))
                                   + variantToStringList(m_app->runtimeParameters().value(qSL("importPaths")));
     if (!importPaths.isEmpty()) {
-        const QString baseDir = m_app->baseDir().absolutePath() + QDir::separator();
+        const QString codeDir = m_app->codeDir() + QDir::separator();
         for (const QString &path : importPaths)
-            m_inProcessQmlEngine->addImportPath(QFileInfo(path).isRelative() ? baseDir + path : path);
+            m_inProcessQmlEngine->addImportPath(QFileInfo(path).isRelative() ? codeDir + path : path);
 
         qCDebug(LogSystem) << "Updated Qml import paths:" << m_inProcessQmlEngine->importPathList();
     }
 
-    QQmlComponent component(m_inProcessQmlEngine, m_app->absoluteCodeFilePath());
+    m_componentError = false;
+    QQmlComponent *component = new QQmlComponent(m_inProcessQmlEngine, m_app->absoluteCodeFilePath());
 
-    if (!component.isReady()) {
-        qCDebug(LogSystem) << "qml-file (" << m_app->absoluteCodeFilePath() << "): component not ready:\n" << component.errorString();
+    if (!component->isReady()) {
+        qCDebug(LogSystem) << "qml-file (" << m_app->absoluteCodeFilePath() << "): component not ready:\n" << component->errorString();
         return false;
     }
 
@@ -148,123 +129,179 @@ bool QmlInProcessRuntime::start()
     QQmlContext *appContext = new QQmlContext(m_inProcessQmlEngine->rootContext());
     m_applicationIf = new QmlInProcessApplicationInterface(this);
     appContext->setContextProperty(qSL("ApplicationInterface"), m_applicationIf);
+    connect(m_applicationIf, &QmlInProcessApplicationInterface::quitAcknowledged,
+            this, [this]() { finish(0, QProcess::NormalExit); });
 
-    QObject *obj = component.beginCreate(appContext);
+    if (appContext->setProperty(s_runtimeKey, QVariant::fromValue(this)))
+        qCritical() << "Could not set" << s_runtimeKey << "property in QML context";
 
-    if (!obj) {
-        qCCritical(LogSystem) << "could not load" << m_app->absoluteCodeFilePath() << ": no root object";
-        delete obj;
-        delete appContext;
-        delete m_applicationIf;
-        m_applicationIf = 0;
-        return false;
-    }
+    QObject *obj = component->beginCreate(appContext);
 
+    QTimer::singleShot(0, this, [component, appContext, obj, this]() {
+        component->completeCreate();
+        if (!obj || m_componentError) {
+            qCCritical(LogSystem) << "could not load" << m_app->absoluteCodeFilePath() << ": no root object";
+            delete obj;
+            delete appContext;
+            delete m_applicationIf;
+            m_applicationIf = nullptr;
+            finish(3, QProcess::NormalExit);
+        } else {
 #if !defined(AM_HEADLESS)
-    FakeApplicationManagerWindow *window = qobject_cast<FakeApplicationManagerWindow*>(obj);
-
-    if (!window) {
-        qCCritical(LogSystem) << "could not load" << m_app->absoluteCodeFilePath() << ": root object is not a ApplicationManagerWindow.";
-        delete obj;
-        delete appContext;
-        delete m_applicationIf;
-        m_applicationIf = 0;
-        return false;
-    }
-    window->m_runtime = this;
-    m_mainWindow = window;
+            if (!qobject_cast<FakeApplicationManagerWindow*>(obj)) {
+                QQuickItem *item = qobject_cast<QQuickItem*>(obj);
+                if (item)
+                    addWindow(item);
+            }
+            m_rootObject = obj;
 #endif
-
-    component.completeCreate();
-    if (!m_document.isEmpty())
-        emit openDocument(m_document);
-
-    emit stateChanged(state());
+            if (!m_document.isEmpty())
+                openDocument(m_document, QString());
+            setState(Active);
+        }
+        delete component;
+    });
     return true;
 }
 
 void QmlInProcessRuntime::stop(bool forceKill)
 {
-    Q_UNUSED(forceKill)// ignore forceKill
-                //... for in-process there is nothing to 'kill'
-                //... all this function does for in-process is firing the 'closing' signal (aka: "application/window want's to close")
+    setState(Shutdown);
     emit aboutToStop();
 
 #if !defined(AM_HEADLESS)
-    for (int i = m_windows.size(); i; --i)
-        emit inProcessSurfaceItemClosing(m_windows.at(i-1));
-    m_windows.clear();
-    m_mainWindow = 0;
-#endif
-    emit stateChanged(state());
+    for (int i = m_surfaces.size(); i; --i)
+        emit inProcessSurfaceItemClosing(m_surfaces.at(i-1));
 
-    deleteLater();
+    if (m_surfaces.isEmpty()) {
+        delete m_rootObject;
+        m_rootObject = nullptr;
+    }
+#endif
+
+    if (forceKill) {
+#if defined(Q_OS_UNIX)
+        int exitCode = SIGKILL;
+#else
+        int exitCode = 0;
+#endif
+        finish(exitCode, QProcess::CrashExit);
+        return;
+    }
+
+    bool ok;
+    int qt = configuration().value(qSL("quitTime")).toInt(&ok);
+    if (!ok || qt < 0)
+        qt = 250;
+    QTimer::singleShot(qt, this, [this]() {
+#if defined(Q_OS_UNIX)
+        int exitCode = SIGTERM;
+#else
+        int exitCode = 0;
+#endif
+        finish(exitCode, QProcess::CrashExit);
+    });
+}
+
+void QmlInProcessRuntime::finish(int exitCode, QProcess::ExitStatus status)
+{
+    QTimer::singleShot(0, this, [this, exitCode, status]() {
+        qCDebug(LogSystem) << "QmlInProcessRuntime (id:" << (m_app ? m_app->id() : qSL("(none)"))
+                           << ") exited with code:" << exitCode << "status:" << status;
+        emit finished(exitCode, status);
+        setState(Inactive);
+#if !defined(AM_HEADLESS)
+        if (m_surfaces.isEmpty())
+            deleteLater();
+#else
+        deleteLater();
+#endif
+    });
 }
 
 #if !defined(AM_HEADLESS)
 
+void QmlInProcessRuntime::inProcessSurfaceItemReleased(QQuickItem *surface)
+{
+    // TODO: Take a snapshot of the last window frame and use this for potential systemUI animations.
+    //       Stop the application (delete its object hierarchy) immediately and remove this workaround.
+    m_surfaces.removeOne(surface);
+    if (state() != Active && m_surfaces.isEmpty()) {
+        delete m_rootObject;
+        m_rootObject = nullptr;
+        if (state() == Inactive)
+            deleteLater();
+    }
+}
+
 void QmlInProcessRuntime::onWindowClose()
 {
-    QQuickItem* window = reinterpret_cast<QQuickItem*>(sender()); // reinterpret_cast because the object might be broken down already!
-    Q_ASSERT(window && m_windows.contains(window));
+    QQuickItem* surface = reinterpret_cast<QQuickItem*>(sender()); // reinterpret_cast because the object might be broken down already!
+    Q_ASSERT(surface && m_surfaces.contains(surface));
 
-    emit inProcessSurfaceItemClosing(window);
+    emit inProcessSurfaceItemClosing(surface);
 }
 
 void QmlInProcessRuntime::onWindowDestroyed()
 {
-    QQuickItem* window = reinterpret_cast<QQuickItem*>(sender()); // reinterpret_cast because the object might be broken down already!
-    m_windows.removeAll(window);
-    if (m_mainWindow == window)
-        m_mainWindow = 0;
+    QObject* sndr = sender();
+    m_surfaces.removeAll(reinterpret_cast<QQuickItem*>(sndr)); // reinterpret_cast because the object might be broken down already!
+    if (m_rootObject == sndr)
+        m_rootObject = nullptr;
 }
 
 void QmlInProcessRuntime::onEnableFullscreen()
 {
-    FakeApplicationManagerWindow *window = qobject_cast<FakeApplicationManagerWindow *>(sender());
+    FakeApplicationManagerWindow *surface = qobject_cast<FakeApplicationManagerWindow *>(sender());
 
-    emit inProcessSurfaceItemFullscreenChanging(window, true);
+    emit inProcessSurfaceItemFullscreenChanging(surface, true);
 }
 
 void QmlInProcessRuntime::onDisableFullscreen()
 {
-    FakeApplicationManagerWindow *window = qobject_cast<FakeApplicationManagerWindow *>(sender());
+    FakeApplicationManagerWindow *surface = qobject_cast<FakeApplicationManagerWindow *>(sender());
 
-    emit inProcessSurfaceItemFullscreenChanging(window, false);
+    emit inProcessSurfaceItemFullscreenChanging(surface, false);
 }
 
 void QmlInProcessRuntime::addWindow(QQuickItem *window)
 {
-    if (m_windows.indexOf(window) == -1) {
-        m_windows.append(window);
+    // Below check is only needed if the root element is a QtObject.
+    // It should be possible to remove this, once proper visible handling is in place.
+    if (state() != Inactive && state() != Shutdown) {
+        auto famw = qobject_cast<FakeApplicationManagerWindow *>(window);
+        QQuickItem *surface = famw ? famw->m_surfaceItem : window;
 
-        if (auto pcw = qobject_cast<FakeApplicationManagerWindow *>(window)) {
-            connect(pcw, &FakeApplicationManagerWindow::fakeFullScreenSignal, this, &QmlInProcessRuntime::onEnableFullscreen);
-            connect(pcw, &FakeApplicationManagerWindow::fakeNoFullScreenSignal, this, &QmlInProcessRuntime::onDisableFullscreen);
-            connect(pcw, &FakeApplicationManagerWindow::fakeCloseSignal, this, &QmlInProcessRuntime::onWindowClose);
-            connect(pcw, &QObject::destroyed, this, &QmlInProcessRuntime::onWindowDestroyed);
+        if (!m_surfaces.contains(surface)) {
+            if (famw) {
+                surface = new InProcessSurfaceItem(famw);
+                connect(famw, &FakeApplicationManagerWindow::fakeFullScreenSignal, this, &QmlInProcessRuntime::onEnableFullscreen);
+                connect(famw, &FakeApplicationManagerWindow::fakeNoFullScreenSignal, this, &QmlInProcessRuntime::onDisableFullscreen);
+                connect(famw, &FakeApplicationManagerWindow::fakeCloseSignal, this, &QmlInProcessRuntime::onWindowClose);
+                connect(famw, &QObject::destroyed, this, &QmlInProcessRuntime::onWindowDestroyed);
+            }
+            m_surfaces.append(surface);
         }
-    }
 
-    emit inProcessSurfaceItemReady(window);
+        emit inProcessSurfaceItemReady(surface);
+    }
+}
+
+void QmlInProcessRuntime::removeWindow(QQuickItem *window)
+{
+    auto famw = qobject_cast<FakeApplicationManagerWindow *>(window);
+    QQuickItem *surface = famw ? famw->m_surfaceItem : window;
+    if (m_surfaces.removeOne(surface))
+        emit inProcessSurfaceItemClosing(surface);
 }
 
 #endif // !AM_HEADLESS
 
-AbstractRuntime::State QmlInProcessRuntime::state() const
-{
-#if !defined(AM_HEADLESS)
-    return m_mainWindow ? Active : Inactive;
-#else
-    return m_applicationIf ? Active : Inactive;
-#endif
-}
-
-void QmlInProcessRuntime::openDocument(const QString &document)
+void QmlInProcessRuntime::openDocument(const QString &document, const QString &mimeType)
 {
     m_document = document;
     if (m_applicationIf)
-        m_applicationIf->openDocument(document);
+        emit m_applicationIf->openDocument(document, mimeType);
 }
 
 qint64 QmlInProcessRuntime::applicationProcessId() const

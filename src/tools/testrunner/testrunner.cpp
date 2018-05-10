@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -46,10 +46,14 @@
 #include <QObject>
 #include <QPointer>
 #include <QQmlEngine>
+#include <QRegExp>
+#include <QRegularExpression>
 
+#include <qlogging.h>
 #include <QtQml/qqmlpropertymap.h>
 #include <QtTest/qtestsystem.h>
 #include <private/quicktestresult_p.h>
+#include <private/qtestlog_p.h>
 
 QT_BEGIN_NAMESPACE
 namespace QTest {
@@ -65,8 +69,9 @@ class QTestRootObject : public QObject
     Q_PROPERTY(bool windowShown READ windowShown NOTIFY windowShownChanged)
     Q_PROPERTY(bool hasTestCase READ hasTestCase WRITE setHasTestCase NOTIFY hasTestCaseChanged)
     Q_PROPERTY(QObject *defined READ defined)
+
 public:
-    QTestRootObject(QObject *parent = 0)
+    QTestRootObject(QObject *parent = nullptr)
         : QObject(parent)
         , m_windowShown(false)
         , m_hasTestCase(false)
@@ -114,6 +119,65 @@ private:
     friend class TestRunner;
 };
 
+class AmTest : public QObject
+{
+    Q_OBJECT
+
+    AmTest() {}
+
+public:
+    enum MsgType { DebugMsg, WarningMsg, CriticalMsg, FatalMsg, InfoMsg, SystemMsg = CriticalMsg };
+    Q_ENUM(MsgType)
+
+    static AmTest *instance();
+
+    Q_INVOKABLE void ignoreMessage(MsgType type, const char* msg);
+    Q_INVOKABLE void ignoreMessage(MsgType type, const QRegExp &expression);
+};
+
+AmTest *AmTest::instance()
+{
+    static QPointer<AmTest> object = new AmTest;
+    if (!object) {
+        qWarning("A new appman test object has been created, the behavior may be compromised");
+        object = new AmTest;
+    }
+    return object;
+}
+
+static QtMsgType convertMsgType(AmTest::MsgType type)
+{
+    QtMsgType ret;
+
+    switch (type) {
+    case AmTest::WarningMsg: ret = QtWarningMsg; break;
+    case AmTest::CriticalMsg: ret = QtCriticalMsg; break;
+    case AmTest::FatalMsg: ret = QtFatalMsg; break;
+    case AmTest::InfoMsg: ret = QtInfoMsg; break;
+    default: ret = QtDebugMsg;
+    }
+    return ret;
+}
+
+void AmTest::ignoreMessage(MsgType type, const char *msg)
+{
+    QTestLog::ignoreMessage(convertMsgType(type), msg);
+}
+
+void AmTest::ignoreMessage(MsgType type, const QRegExp &expression)
+{
+#ifndef QT_NO_REGULAREXPRESSION
+    QRegularExpression re(expression.pattern());
+    if (expression.caseSensitivity() == Qt::CaseInsensitive)
+        re.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
+    QTestLog::ignoreMessage(convertMsgType(type), re);
+#else
+    Q_UNUSED(type);
+    Q_UNUSED(expression);
+    qWarning() << "Cannot ignore message: regular expressions are not supported";
+#endif
+}
+
 static QObject *testRootObject(QQmlEngine *engine, QJSEngine *jsEngine)
 {
     Q_UNUSED(engine);
@@ -121,32 +185,32 @@ static QObject *testRootObject(QQmlEngine *engine, QJSEngine *jsEngine)
     return QTestRootObject::instance();
 }
 
-void TestRunner::initialize(char *name, const QStringList &positionalArguments)
+static QObject *amTest(QQmlEngine *engine, QJSEngine *jsEngine)
 {
-    QuickTestResult::setCurrentAppname(name);
-    QuickTestResult::setProgramName(name);
+    Q_UNUSED(engine);
+    Q_UNUSED(jsEngine);
+    return AmTest::instance();
+}
 
-    //Convert all the positional arguments back into a char * array.
-    QScopedArrayPointer<char *> testArgV(new char *[positionalArguments.count() + 1]);
-    testArgV[0] = name;
-    int testArgC = 1;
+void TestRunner::initialize(const QStringList &testRunnerArguments)
+{
+    Q_ASSERT(!testRunnerArguments.isEmpty());
 
-    static QList<QByteArray> argList;
-    argList.append("");
-    for (const auto &arg : positionalArguments) {
-        //This is already parsed by appman
-        if (arg.endsWith(qL1S(".qml")))
-            continue;
-        argList.append(arg.toLocal8Bit());
-        testArgV[testArgC] = argList[testArgC].data();
-        testArgC++;
-    }
+    // Convert all the arguments back into a char * array.
+    // These need to be alive as long as the program is running!
+    static QVector<char *> testArgV;
+    for (const auto &arg : testRunnerArguments)
+        testArgV << strdup(arg.toLocal8Bit().constData());
+    atexit([]() { std::for_each(testArgV.constBegin(), testArgV.constEnd(), free); });
 
-    QuickTestResult::parseArgs(testArgC, testArgV.data());
+    QuickTestResult::setCurrentAppname(testArgV.constFirst());
+    QuickTestResult::setProgramName(testArgV.constFirst());
+    QuickTestResult::parseArgs(testArgV.size(), testArgV.data());
     qputenv("QT_QTESTLIB_RUNNING", "1");
 
-    // Register the test object
+    // Register the test object and application-manager test add-on
     qmlRegisterSingletonType<QTestRootObject>("Qt.test.qtestroot", 1, 0, "QTestRootObject", testRootObject);
+    qmlRegisterSingletonType<AmTest>("QtApplicationManager", 1, 0, "AmTest", amTest);
 
     QTestRootObject::instance()->init();
 }
@@ -167,7 +231,7 @@ int TestRunner::exec(QQmlEngine *engine)
     if (!QTestRootObject::instance()->hasQuit() && QTestRootObject::instance()->hasTestCase())
         eventLoop.exec();
 
-    QuickTestResult::setProgramName(0);
+    QuickTestResult::setProgramName(nullptr);
 
     return QuickTestResult::exitCode();
 }

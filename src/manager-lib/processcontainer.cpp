@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -40,9 +40,12 @@
 ****************************************************************************/
 
 #include "global.h"
+#include "logging.h"
 #include "containerfactory.h"
 #include "application.h"
 #include "processcontainer.h"
+#include "systemreader.h"
+#include "debugwrapper.h"
 
 #if defined(Q_OS_UNIX)
 #  include <csignal>
@@ -58,16 +61,47 @@ HostProcess::HostProcess()
     m_process.setInputChannelMode(QProcess::ForwardedInputChannel);
 }
 
+HostProcess::~HostProcess()
+{
+    m_process.disconnect(this);
+}
+
 void HostProcess::start(const QString &program, const QStringList &arguments)
 {
-    connect(&m_process, &QProcess::started, this, &HostProcess::started);
+    connect(&m_process, &QProcess::started, this, [this]() {
+         // we to cache the pid in order to have it available after the process crashed
+        m_pid = m_process.processId();
+        emit started();
+    });
     connect(&m_process, static_cast<void (QProcess::*)(QProcess::ProcessError)>(&QProcess::error),
             this, &HostProcess::errorOccured);
     connect(&m_process, static_cast<void (QProcess::*)(int,QProcess::ExitStatus)>(&QProcess::finished),
             this, &HostProcess::finished);
     connect(&m_process, &QProcess::stateChanged, this, &HostProcess::stateChanged);
 
+#if defined(Q_OS_UNIX)
+    // make sure that the redirection fds do not have a close-on-exec flag, since we need them
+    // in the child process.
+    for (int fd : qAsConst(m_process.m_stdioRedirections)) {
+        if (fd < 0)
+            continue;
+        int flags = fcntl(fd, F_GETFD);
+        if (flags & FD_CLOEXEC)
+            fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
+    }
+#endif
+
     m_process.start(program, arguments);
+
+#if defined(Q_OS_UNIX)
+    // we are forked now and the child process has received a copy of all redirected fds
+    // now it's time to close our fds, since we don't need them anymore (plus we would block
+    // the tty where they originated from)
+    for (int fd : qAsConst(m_process.m_stdioRedirections)) {
+        if (fd >= 0)
+            ::close(fd);
+    }
+#endif
 }
 
 void HostProcess::setWorkingDirectory(const QString &dir)
@@ -92,7 +126,7 @@ void HostProcess::terminate()
 
 qint64 HostProcess::processId() const
 {
-    return m_process.processId();
+    return m_pid;
 }
 
 QProcess::ProcessState HostProcess::state() const
@@ -100,19 +134,9 @@ QProcess::ProcessState HostProcess::state() const
     return m_process.state();
 }
 
-void HostProcess::setRedirections(const QVector<int> &stdRedirections)
+void HostProcess::setStdioRedirections(const QVector<int> &stdioRedirections)
 {
-    m_process.m_stdRedirections = stdRedirections;
-
-#if defined(Q_OS_UNIX)
-    for (int fd : qAsConst(m_process.m_stdRedirections)) {
-        if (fd < 0)
-            continue;
-        int flags = fcntl(fd, F_GETFD);
-        if (flags & FD_CLOEXEC)
-            fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
-    }
-#endif
+    m_process.m_stdioRedirections = stdioRedirections;
 }
 
 void HostProcess::setStopBeforeExec(bool stopBeforeExec)
@@ -121,15 +145,14 @@ void HostProcess::setStopBeforeExec(bool stopBeforeExec)
 }
 
 
-
-ProcessContainer::ProcessContainer(ProcessContainerManager *manager)
-    : AbstractContainer(manager)
-{ }
-
-ProcessContainer::ProcessContainer(const ContainerDebugWrapper &debugWrapper, ProcessContainerManager *manager)
-    : AbstractContainer(manager)
-    , m_useDebugWrapper(true)
-    , m_debugWrapper(debugWrapper)
+ProcessContainer::ProcessContainer(ProcessContainerManager *manager, const Application *app,
+                                   const QVector<int> &stdioRedirections,
+                                   const QMap<QString, QString> &debugWrapperEnvironment,
+                                   const QStringList &debugWrapperCommand)
+    : AbstractContainer(manager, app)
+    , m_stdioRedirections(stdioRedirections)
+    , m_debugWrapperEnvironment(debugWrapperEnvironment)
+    , m_debugWrapperCommand(debugWrapperCommand)
 { }
 
 ProcessContainer::~ProcessContainer()
@@ -167,6 +190,17 @@ bool ProcessContainer::setControlGroup(const QString &groupName)
                 qWarning() << "Failed setting cgroup for" << m_program << ", pid" << m_process->processId() << ":" << resource << "->" << userclass;
                 return false;
             }
+
+            if (resource == qSL("memory")) {
+                if (!m_memWatcher) {
+                    m_memWatcher = new MemoryWatcher(this);
+                    connect(m_memWatcher, &MemoryWatcher::memoryLow,
+                            this, &ProcessContainer::memoryLowWarning);
+                    connect(m_memWatcher, &MemoryWatcher::memoryCritical,
+                            this, &ProcessContainer::memoryCriticalWarning);
+                }
+                m_memWatcher->startWatching(userclass);
+            }
         }
         m_currentControlGroup = groupName;
         return true;
@@ -179,7 +213,8 @@ bool ProcessContainer::isReady()
     return true;
 }
 
-AbstractContainerProcess *ProcessContainer::start(const QStringList &arguments, const QProcessEnvironment &environment)
+AbstractContainerProcess *ProcessContainer::start(const QStringList &arguments,
+                                                  const QMap<QString, QString> &runtimeEnvironment)
 {
     if (m_process) {
         qWarning() << "Process" << m_program << "is already started and cannot be started again";
@@ -188,26 +223,37 @@ AbstractContainerProcess *ProcessContainer::start(const QStringList &arguments, 
     if (!QFile::exists(m_program))
         return nullptr;
 
-    QProcessEnvironment completeEnv = environment;
-    if (completeEnv.isEmpty())
-        completeEnv = QProcessEnvironment::systemEnvironment();
+    QProcessEnvironment penv = QProcessEnvironment::systemEnvironment();
+
+    for (auto it = runtimeEnvironment.cbegin(); it != runtimeEnvironment.cend(); ++it) {
+        if (it.value().isEmpty())
+            penv.remove(it.key());
+        else
+            penv.insert(it.key(), it.value());
+    }
+    for (auto it = m_debugWrapperEnvironment.cbegin(); it != m_debugWrapperEnvironment.cend(); ++it) {
+        if (it.value().isEmpty())
+            penv.remove(it.key());
+        else
+            penv.insert(it.key(), it.value());
+    }
 
     HostProcess *process = new HostProcess();
     process->setWorkingDirectory(m_baseDirectory);
-    process->setProcessEnvironment(completeEnv);
+    process->setProcessEnvironment(penv);
     process->setStopBeforeExec(configuration().value(qSL("stopBeforeExec")).toBool());
+    process->setStdioRedirections(m_stdioRedirections);
 
     QString command = m_program;
     QStringList args = arguments;
 
-    if (m_useDebugWrapper) {
-        m_debugWrapper.resolveParameters(m_program, arguments);
-        process->setRedirections(m_debugWrapper.stdRedirections());
+    if (!m_debugWrapperCommand.isEmpty()) {
+        auto cmd = DebugWrapper::substituteCommand(m_debugWrapperCommand, m_program, arguments);
 
-        command = m_debugWrapper.command().at(0);
-        args = m_debugWrapper.command().mid(1);
+        command = cmd.takeFirst();
+        args = cmd;
     }
-    qCDebug(LogSystem) << "Running command:" << command << args;
+    qCDebug(LogSystem) << "Running command:" << command << "arguments:" << args;
 
     process->start(command, args);
     m_process = process;
@@ -234,14 +280,11 @@ bool ProcessContainerManager::supportsQuickLaunch() const
     return true;
 }
 
-AbstractContainer *ProcessContainerManager::create()
+AbstractContainer *ProcessContainerManager::create(const Application *app, const QVector<int> &stdioRedirections,
+                                                   const QMap<QString, QString> &debugWrapperEnvironment,
+                                                   const QStringList &debugWrapperCommand)
 {
-    return new ProcessContainer(this);
-}
-
-AbstractContainer *ProcessContainerManager::create(const ContainerDebugWrapper &debugWrapper)
-{
-    return new ProcessContainer(debugWrapper, this);
+    return new ProcessContainer(this, app, stdioRedirections, debugWrapperEnvironment, debugWrapperCommand);
 }
 
 void HostProcess::MyQProcess::setupChildProcess()
@@ -251,10 +294,14 @@ void HostProcess::MyQProcess::setupChildProcess()
         fprintf(stderr, "\n*** a 'process' container was started in stopped state ***\nthe process is suspended via SIGSTOP and you can attach a debugger to it via\n\n   gdb -p %d\n\n", getpid());
         raise(SIGSTOP);
     }
+    // duplicate any requested redirections to the respective stdin/out/err fd. Also make sure to
+    // close the original fd: otherwise we would block the tty where the fds originated from.
     for (int i = 0; i < 3; ++i) {
-        int fd = m_stdRedirections.value(i, -1);
-        if (fd >= 0)
+        int fd = m_stdioRedirections.value(i, -1);
+        if (fd >= 0) {
             dup2(fd, i);
+            ::close(fd);
+        }
     }
 #endif
 }

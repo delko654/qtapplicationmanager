@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -59,7 +59,9 @@ class PackageCreator : public QObject
     Q_OBJECT
 
 public:
-    PackageCreator(const QDir &sourceDir, QIODevice *output, const InstallationReport &report, QObject *parent = 0);
+    PackageCreator(const QDir &sourceDir, QIODevice *output, const InstallationReport &report,
+                   QObject *parent = nullptr);
+    ~PackageCreator();
 
     QDir sourceDirectory() const;
     void setSourceDirectory(const QDir &sourceDir);
@@ -67,6 +69,7 @@ public:
     bool create();
 
     QByteArray createdDigest() const;
+    QVariantMap metaData() const;
 
     bool hasFailed() const;
     bool wasCanceled() const;

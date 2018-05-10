@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -44,23 +44,239 @@
 #include <QBuffer>
 
 #include "application.h"
-#include "utilities.h"
 #include "exception.h"
 #include "installationreport.h"
 #include "yamlapplicationscanner.h"
 
+/*!
+    \qmltype Application
+    \inqmlmodule QtApplicationManager
+    \brief The handle for an application known to the ApplicationManager.
+
+    Most of the read-only properties map directly to values read from the application's
+    \c info.yaml file - these are documented in the \l{Manifest Definition}.
+
+    \note There is an unfortunate naming conflict with the (undocumented) \c Application object
+          returned from \l{QtQml::Qt::application}{Qt.application}. If you want to use the enums
+          defined in the application-manager's \c Application class, you need to use an alias import:
+
+    \badcode
+    import QtApplicationManager 1.0 as AppMan
+
+    ...
+
+    if (app.lastExitStatus == AppMan.Application.NormalExit)
+        ...
+    \endcode
+*/
+
+/*!
+    \qmlproperty string Application::id
+    \readonly
+
+    This property returns the unique id of the application.
+*/
+/*!
+    \qmlproperty string Application::runtimeName
+    \readonly
+
+    This property holds the name of the runtime, necessary to run the application's code.
+*/
+/*!
+    \qmlproperty object Application::runtimeParameters
+    \readonly
+
+    This property holds a QVariantMap that is passed onto, and interpreted by the application's
+    runtime.
+*/
+/*!
+    \qmlproperty url Application::icon
+    \readonly
+
+    The URL of the application's icon - can be used as the source property of an \l Image.
+*/
+/*!
+    \qmlproperty string Application::documentUrl
+    \readonly
+
+    This property always returns the default \c documentUrl specified in the manifest file, even if
+    a different URL was used to start the application.
+*/
+/*!
+    \qmlproperty real Application::importance
+    \readonly
+
+    A value between \c 0.0 and \c 1.0 specifying the inverse probability of being terminated in
+    out-of-memory situations (the default is \c 0.0 - unimportant).
+*/
+/*!
+    \qmlproperty bool Application::builtIn
+    \readonly
+
+    This property describes, if this application is part of the built-in set of applications of the
+    current System-UI.
+*/
+/*!
+    \qmlproperty bool Application::alias
+    \readonly
+
+    Will return \c true if this Application object is an alias to another one.
+*/
+/*!
+    \qmlproperty bool Application::preload
+    \readonly
+
+    When set to true, the application-manager tries to start the application immediately after boot,
+    but keeps it in the background.
+*/
+/*!
+    \qmlproperty Application Application::nonAliased
+    \readonly
+
+    If this Application object is an alias, then you can access the non-alias, base Application
+    object via this property.
+*/
+/*!
+    \qmlproperty list<string> Application::capabilities
+    \readonly
+
+    A list of special access rights for the application - these capabilities can later be queried
+    and verified by the middleware via the application-manager.
+*/
+/*!
+    \qmlproperty list<string> Application::supportedMimeTypes
+    \readonly
+
+    An array of MIME types the application can handle.
+*/
+/*!
+    \qmlproperty list<string> Application::categories
+    \readonly
+
+    A list of category names the application should be associated with. This is mainly for the
+    automated app-store uploads as well as displaying the application within a fixed set of
+    categories in the System-UI.
+*/
+/*!
+    \qmlproperty object Application::applicationProperties
+    \readonly
+
+    All user-defined properties of this application as listed in the private and protected sections
+    of the \c applicationProperties field in the manifest file.
+*/
+/*!
+    \qmlproperty Runtime Application::runtime
+    \readonly
+
+    Will return a valid \l Runtime object, if the application is currently starting, running or
+    shutting down. May return a \c null object, if the application was not yet started.
+*/
+/*!
+    \qmlproperty int Application::lastExitCode
+    \readonly
+
+    This property holds the last exit-code of the application's process in multi-process mode.
+    On successful application shutdown, this value should normally be \c 0, but can be whatever
+    the application returns from its \c main() function.
+*/
+/*!
+    \qmlproperty enumeration Application::lastExitStatus
+    \readonly
+
+    This property returns the last exit-status of the application's process in multi-process mode.
+
+    \list
+    \li Application.NormalExit - The application exited normally.
+    \li Application.CrashExit - The application crashed.
+    \li Application.ForcedExit - The application was killed by the application-manager, since it
+                                 ignored the quit request originating from a call to
+                                 ApplicationManager::stopApplication.
+    \endlist
+
+    \sa ApplicationInterface::quit, ApplicationInterface::acknowledgeQuit
+*/
+/*!
+    \qmlproperty string Application::version
+    \readonly
+
+    Holds the version of the application as a string.
+*/
+/*!
+    \qmlproperty enumeration Application::backgroundMode
+    \readonly
+
+    Specifies if and why the application needs to be kept running in the background - can be
+    one of:
+
+    \list
+    \li Application.Auto - The application does not care.
+    \li Application.Never - The application should not be kept running in the background.
+    \li Application.ProvidesVoIP - The application provides VoIP services while in the background.
+    \li Application.PlaysAudio - The application plays audio while in the background.
+    \li Application.TracksLocation - The application tracks the current location while in the
+                                     background.
+    \endlist
+
+    By default, the background mode is \c Auto.
+    This is just a hint for the System-UI - the application-manager itself will not enforce this
+    policy.
+*/
+/*!
+    \qmlproperty string Application::codeDir
+    \readonly
+
+    The absolute path to the application's installation directory. Please note this directory might
+    not always be available for applications that were installed onto removable media.
+
+    \sa {Installation Locations}
+*/
+/*!
+    \qmlproperty enumeration Application::state
+    \readonly
+
+    This property holds the current installation state of the application. It can be one of:
+
+    \list
+    \li Application.Installed - The application is completely installed and ready to be used.
+    \li Application.BeingInstalled - The application is currently in the process of being installed.
+    \li Application.BeingUpdated - The application is currently in the process of being updated.
+    \li Application.BeingRemoved - The application is currently in the process of being removed.
+    \endlist
+*/
+/*!
+    \qmlsignal Application::activated()
+
+    This signal is emitted when the application is started or when it's already running but has
+    been requested to be brought to foreground or raised.
+*/
+
+
 QT_BEGIN_NAMESPACE_AM
 
+//TODO Make this really unique
+static int uniqueCounter = 0;
+static int nextUniqueNumber() {
+    uniqueCounter++;
+    if (uniqueCounter > 999)
+        uniqueCounter = 0;
+
+    return uniqueCounter;
+}
+
 Application::Application()
+    : m_uniqueNumber(nextUniqueNumber())
 { }
 
 QVariantMap Application::toVariantMap() const
 {
-    //TODO: only used in the installer -- replace there with code that mimicks
-    // ApplicationManager::get() to get consistent key names in the objects
+    //TODO: check if we can find a better method to keep this as similar as possible to
+    //      ApplicationManager::get().
+    //      This is used for RuntimeInterface::startApplication(), ContainerInterface and
+    //      ApplicationInstaller::taskRequestingInstallationAcknowledge.
 
     QVariantMap map;
     map[qSL("id")] = m_id;
+    map[qSL("uniqueNumber")] = m_uniqueNumber;
     map[qSL("codeFilePath")] = m_codeFilePath;
     map[qSL("runtimeName")] = m_runtimeName;
     map[qSL("runtimeParameters")] = m_runtimeParameters;
@@ -85,8 +301,13 @@ QVariantMap Application::toVariantMap() const
     }
     map[qSL("backgroundMode")] = backgroundMode;
     map[qSL("version")] = m_version;
-    map[qSL("baseDir")] = m_baseDir.absolutePath();
+    map[qSL("codeDir")] = m_codeDir.absolutePath();
+    map[qSL("manifestDir")] = m_manifestDir.absolutePath();
+    map[qSL("environmentVariables")] = m_environmentVariables;
     map[qSL("installationLocationId")] = m_installationReport ? m_installationReport->installationLocationId() : QString();
+    map[qSL("applicationProperties")] = m_allAppProperties;
+    map[qSL("supportsApplicationInterface")] = m_supportsApplicationInterface;
+
     return map;
 }
 
@@ -96,10 +317,15 @@ QString Application::id() const
     return m_id;
 }
 
+int Application::uniqueNumber() const
+{
+    return m_uniqueNumber;
+}
+
 QString Application::absoluteCodeFilePath() const
 {
     QString code = m_nonAliased ? m_nonAliased->m_codeFilePath : m_codeFilePath;
-    return code.isEmpty() ? QString() : baseDir().absoluteFilePath(code);
+    return code.isEmpty() ? QString() : QDir(codeDir()).absoluteFilePath(code);
 }
 
 QString Application::codeFilePath() const
@@ -117,6 +343,11 @@ QVariantMap Application::runtimeParameters() const
     return m_nonAliased ? m_nonAliased->m_runtimeParameters : m_runtimeParameters;
 }
 
+QVariantMap Application::environmentVariables() const
+{
+    return m_environmentVariables;
+}
+
 QMap<QString, QString> Application::names() const
 {
     return m_name;
@@ -129,12 +360,39 @@ QString Application::name(const QString &language) const
 
 QString Application::icon() const
 {
-    return m_icon.isEmpty() ? QString() : baseDir().absoluteFilePath(m_icon);
+    if (m_icon.isEmpty())
+        return QString();
+
+    QDir dir;
+    switch (m_state) {
+    default:
+    case Installed:
+        dir = manifestDir();
+        break;
+    case BeingInstalled:
+    case BeingUpdated:
+        dir = QDir(m_codeDir.absolutePath() + QLatin1Char('+'));
+        break;
+    case BeingRemoved:
+        dir = QDir(m_codeDir.absolutePath() + QLatin1Char('-'));
+        break;
+    }
+    return dir.absoluteFilePath(m_icon);
+}
+
+QUrl Application::iconUrl() const
+{
+    return QUrl::fromLocalFile(icon());
 }
 
 QString Application::documentUrl() const
 {
     return m_documentUrl;
+}
+
+bool Application::supportsApplicationInterface() const
+{
+    return m_supportsApplicationInterface;
 }
 
 int Application::lastExitCode() const
@@ -145,6 +403,53 @@ int Application::lastExitCode() const
 Application::ExitStatus Application::lastExitStatus() const
 {
     return m_lastExitStatus;
+}
+
+bool Application::isValidApplicationId(const QString &appId, bool isAliasName, QString *errorString)
+{
+    static const int maxLength = 150;
+
+    try {
+        if (appId.isEmpty())
+            throw Exception(Error::Parse, "must not be empty");
+
+        // we need to make sure that we can use the name as directory on a FAT formatted SD-card,
+        // which has a 255 character path length restriction
+        if (appId.length() > maxLength)
+            throw Exception(Error::Parse, "the maximum length is %1 characters (found %2 characters)").arg(maxLength, appId.length());
+
+        int aliasPos = -1;
+
+        // aliases need to have the '@' marker
+        if (isAliasName) {
+            aliasPos = appId.indexOf(qL1C('@'));
+            if (aliasPos < 0 || aliasPos == (appId.size() - 1))
+                throw Exception(Error::Parse, "missing alias-id tag '@'");
+        }
+
+        // all characters need to be ASCII minus '@' and any filesystem special characters:
+        bool spaceOnly = true;
+        static const char forbiddenChars[] = "@<>:\"/\\|?*";
+        for (int pos = 0; pos < appId.length(); ++pos) {
+            if (pos == aliasPos)
+                continue;
+            ushort ch = appId.at(pos).unicode();
+            if ((ch < 0x20) || (ch > 0x7f) || strchr(forbiddenChars, ch & 0xff)) {
+                throw Exception(Error::Parse, "must consist of printable ASCII characters only, except any of \'%1'")
+                        .arg(QString::fromLatin1(forbiddenChars));
+            }
+            if (spaceOnly)
+                spaceOnly = QChar(ch).isSpace();
+        }
+        if (spaceOnly)
+            throw Exception(Error::Parse, "must not consist of only white-space characters");
+
+        return true;
+    } catch (const Exception &e) {
+        if (errorString)
+            *errorString = e.errorString();
+        return false;
+    }
 }
 
 bool Application::isPreloaded() const
@@ -187,9 +492,14 @@ QStringList Application::categories() const
     return m_nonAliased ? m_nonAliased->m_categories : m_categories;
 }
 
-Application::Type Application::type() const
+QVariantMap Application::applicationProperties() const
 {
-    return m_nonAliased ? m_nonAliased->m_type : m_type;
+    return m_sysAppProperties;
+}
+
+QVariantMap Application::allAppProperties() const
+{
+    return m_allAppProperties;
 }
 
 Application::BackgroundMode Application::backgroundMode() const
@@ -202,7 +512,12 @@ QString Application::version() const
     return m_nonAliased ? m_nonAliased->m_version : m_version;
 }
 
-void Application::validate() const throw(Exception)
+QVariantMap Application::openGLConfiguration() const
+{
+    return m_nonAliased ? m_nonAliased->m_openGLConfiguration : m_openGLConfiguration;
+}
+
+void Application::validate() const Q_DECL_NOEXCEPT_EXPR(false)
 {
     if (isAlias()) {
         if (!m_id.startsWith(nonAliased()->id()))
@@ -210,22 +525,20 @@ void Application::validate() const throw(Exception)
                     .arg(m_id, nonAliased()->id());
     }
 
-    QString rdnsError;
-    if (!isValidDnsName(id(), isAlias(), &rdnsError))
-        throw Exception(Error::Parse, "the identifier (%1) is not a valid reverse-DNS name: %2").arg(id()).arg(rdnsError);
+    QString appIdError;
+    if (!isValidApplicationId(id(), isAlias(), &appIdError))
+        throw Exception(Error::Parse, "the identifier (%1) is not a valid application-id: %2").arg(id()).arg(appIdError);
     if (absoluteCodeFilePath().isEmpty())
         throw Exception(Error::Parse, "the 'code' field must not be empty");
 
     if (runtimeName().isEmpty())
         throw Exception(Error::Parse, "the 'runtimeName' field must not be empty");
 
-    if (type() == Gui) {
-        if (icon().isEmpty())
-            throw Exception(Error::Parse, "the 'icon' field must not be empty");
+    if (icon().isEmpty())
+        throw Exception(Error::Parse, "the 'icon' field must not be empty");
 
-        if (names().isEmpty())
-            throw Exception(Error::Parse, "the 'name' field must not be empty");
-    }
+    if (names().isEmpty())
+        throw Exception(Error::Parse, "the 'name' field must not be empty");
 
     // This check won't work during installations, since icon.png is extracted after info.json
     //        if (!QFile::exists(displayIcon()))
@@ -242,15 +555,22 @@ void Application::mergeInto(Application *app) const
     app->m_codeFilePath = m_codeFilePath;
     app->m_runtimeName = m_runtimeName;
     app->m_runtimeParameters = m_runtimeParameters;
+    app->m_environmentVariables = m_environmentVariables;
     app->m_name = m_name;
     app->m_icon = m_icon;
+    app->m_documentUrl = m_documentUrl;
+    app->m_allAppProperties = m_allAppProperties;
+    app->m_sysAppProperties = m_sysAppProperties;
+    app->m_supportsApplicationInterface = m_supportsApplicationInterface;
     app->m_preload = m_preload;
     app->m_importance = m_importance;
     app->m_capabilities = m_capabilities;
-    app->m_mimeTypes = m_mimeTypes;
     app->m_categories = m_categories;
+    app->m_mimeTypes = m_mimeTypes;
     app->m_backgroundMode = m_backgroundMode;
     app->m_version = m_version;
+    app->m_openGLConfiguration = m_openGLConfiguration;
+    emit app->bulkChange();
 }
 
 const InstallationReport *Application::installationReport() const
@@ -263,17 +583,22 @@ void Application::setInstallationReport(InstallationReport *report)
     m_installationReport.reset(report);
 }
 
-QDir Application::baseDir() const
+QString Application::manifestDir() const
+{
+    return m_manifestDir.absolutePath();
+}
+
+QString Application::codeDir() const
 {
     switch (m_state) {
     default:
     case Installed:
-        return m_baseDir;
+        return m_codeDir.absolutePath();
     case BeingInstalled:
     case BeingUpdated:
-        return QDir(m_baseDir.absolutePath() + QLatin1Char('+'));
+        return m_codeDir.absolutePath() + QLatin1Char('+');
     case BeingRemoved:
-        return QDir(m_baseDir.absolutePath() + QLatin1Char('-'));
+        return m_codeDir.absolutePath() + QLatin1Char('-');
     }
 }
 
@@ -282,14 +607,24 @@ uint Application::uid() const
     return m_nonAliased ? m_nonAliased->m_uid : m_uid;
 }
 
-void Application::setBaseDir(const QString &path)
+void Application::setCodeDir(const QString &path)
 {
-    m_baseDir = path;
+    m_codeDir = path;
+}
+
+void Application::setManifestDir(const QString &path)
+{
+    m_manifestDir = path;
 }
 
 void Application::setBuiltIn(bool builtIn)
 {
     m_builtIn = builtIn;
+}
+
+void Application::setSupportsApplicationInterface(bool supportsAppInterface)
+{
+    m_supportsApplicationInterface = supportsAppInterface;
 }
 
 AbstractRuntime *Application::currentRuntime() const
@@ -303,21 +638,22 @@ void Application::setCurrentRuntime(AbstractRuntime *rt) const
         m_nonAliased->m_runtime = rt;
     else
         m_runtime = rt;
+    emit runtimeChanged();
 }
 
-bool Application::isLocked() const
+bool Application::isBlocked() const
 {
-    return (m_nonAliased ? m_nonAliased->m_locked : m_locked).load() == 1;
+    return (m_nonAliased ? m_nonAliased->m_blocked : m_blocked).load() == 1;
 }
 
-bool Application::lock() const
+bool Application::block() const
 {
-    return (m_nonAliased ? m_nonAliased->m_locked : m_locked).testAndSetOrdered(0, 1);
+    return (m_nonAliased ? m_nonAliased->m_blocked : m_blocked).testAndSetOrdered(0, 1);
 }
 
-bool Application::unlock() const
+bool Application::unblock() const
 {
-    return (m_nonAliased ? m_nonAliased->m_locked : m_locked).testAndSetOrdered(1, 0);
+    return (m_nonAliased ? m_nonAliased->m_blocked : m_blocked).testAndSetOrdered(1, 0);
 }
 
 Application::State Application::state() const
@@ -330,21 +666,26 @@ qreal Application::progress() const
     return m_nonAliased ? m_nonAliased->m_progress : m_progress;
 }
 
-Application *Application::readFromDataStream(QDataStream &ds, const QVector<const Application *> &applicationDatabase) throw (Exception)
+Application *Application::readFromDataStream(QDataStream &ds, const QVector<const Application *> &applicationDatabase) Q_DECL_NOEXCEPT_EXPR(false)
 {
     QScopedPointer<Application> app(new Application);
     bool isAlias;
     qint32 backgroundMode;
-    QString baseDir;
+    QString codeDir;
+    QString manifestDir;
     QByteArray installationReport;
 
     ds >> app->m_id
+       >> app->m_uniqueNumber
        >> app->m_codeFilePath
        >> app->m_runtimeName
        >> app->m_runtimeParameters
        >> app->m_name
        >> app->m_icon
        >> app->m_documentUrl
+       >> app->m_allAppProperties
+       >> app->m_sysAppProperties
+       >> app->m_supportsApplicationInterface
        >> app->m_preload
        >> app->m_importance
        >> app->m_builtIn
@@ -354,28 +695,34 @@ Application *Application::readFromDataStream(QDataStream &ds, const QVector<cons
        >> app->m_mimeTypes
        >> backgroundMode
        >> app->m_version
-       >> baseDir
+       >> app->m_openGLConfiguration
+       >> codeDir
+       >> manifestDir
        >> app->m_uid
+       >> app->m_environmentVariables
        >> installationReport;
+
+    uniqueCounter = qMax(uniqueCounter, app->m_uniqueNumber);
 
     app->m_capabilities.sort();
     app->m_categories.sort();
     app->m_mimeTypes.sort();
 
     app->m_backgroundMode = static_cast<Application::BackgroundMode>(backgroundMode);
-    app->m_baseDir.setPath(baseDir);
+    app->m_codeDir.setPath(codeDir);
+    app->m_manifestDir.setPath(manifestDir);
     if (!installationReport.isEmpty()) {
         QBuffer buffer(&installationReport);
         buffer.open(QBuffer::ReadOnly);
         app->m_installationReport.reset(new InstallationReport(app->m_id));
         if (!app->m_installationReport->deserialize(&buffer))
-            app->m_installationReport.reset(0);
+            app->m_installationReport.reset();
     }
 
     if (isAlias) {
         QString baseId = app->m_id.section(qL1C('@'), 0, 0);
         bool found = false;
-        foreach (const Application *otherApp, applicationDatabase) {
+        for (const Application *otherApp : applicationDatabase) {
             if (otherApp->id() == baseId) {
                 app->m_nonAliased = otherApp;
                 found = true;
@@ -389,7 +736,7 @@ Application *Application::readFromDataStream(QDataStream &ds, const QVector<cons
     return app.take();
 }
 
-void Application::writeToDataStream(QDataStream &ds, const QVector<const Application *> &applicationDatabase) const throw (Exception)
+void Application::writeToDataStream(QDataStream &ds, const QVector<const Application *> &applicationDatabase) const Q_DECL_NOEXCEPT_EXPR(false)
 {
     QByteArray serializedReport;
 
@@ -400,12 +747,16 @@ void Application::writeToDataStream(QDataStream &ds, const QVector<const Applica
     }
 
     ds << m_id
+       << m_uniqueNumber
        << m_codeFilePath
        << m_runtimeName
        << m_runtimeParameters
        << m_name
        << m_icon
        << m_documentUrl
+       << m_allAppProperties
+       << m_sysAppProperties
+       << m_supportsApplicationInterface
        << m_preload
        << m_importance
        << m_builtIn
@@ -415,8 +766,11 @@ void Application::writeToDataStream(QDataStream &ds, const QVector<const Applica
        << m_mimeTypes
        << qint32(m_backgroundMode)
        << m_version
-       << m_baseDir.absolutePath()
+       << m_openGLConfiguration
+       << m_codeDir.absolutePath()
+       << m_manifestDir.absolutePath()
        << m_uid
+       << m_environmentVariables
        << serializedReport;
 }
 

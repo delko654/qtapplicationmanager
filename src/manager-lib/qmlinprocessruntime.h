@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -52,8 +52,8 @@ class QmlInProcessRuntimeManager : public AbstractRuntimeManager
 {
     Q_OBJECT
 public:
-    explicit QmlInProcessRuntimeManager(QObject *parent = 0);
-    explicit QmlInProcessRuntimeManager(const QString &id, QObject *parent = 0);
+    explicit QmlInProcessRuntimeManager(QObject *parent = nullptr);
+    explicit QmlInProcessRuntimeManager(const QString &id, QObject *parent = nullptr);
 
     static QString defaultIdentifier();
     bool inProcess() const override;
@@ -70,13 +70,15 @@ public:
     explicit QmlInProcessRuntime(const Application *app, QmlInProcessRuntimeManager *manager);
     ~QmlInProcessRuntime();
 
-    State state() const override;
-    void openDocument(const QString &document) override;
+    void openDocument(const QString &document, const QString &mimeType) override;
     qint64 applicationProcessId() const override;
 
 public slots:
     bool start() override;
     void stop(bool forceKill = false) override;
+#if !defined(AM_HEADLESS)
+    void inProcessSurfaceItemReleased(QQuickItem *window) override;
+#endif
 
 signals:
     void aboutToStop(); // used for the ApplicationInterface
@@ -89,17 +91,22 @@ private slots:
     void onEnableFullscreen();
     void onDisableFullscreen();
 #endif
+    void finish(int exitCode, QProcess::ExitStatus status);
 
 private:
+    static const char *s_runtimeKey;
+
     QString m_document;
-    QmlInProcessApplicationInterface *m_applicationIf = 0;
+    QmlInProcessApplicationInterface *m_applicationIf = nullptr;
+    bool m_componentError;
 
 #if !defined(AM_HEADLESS)
     // used by FakeApplicationManagerWindow to register windows
     void addWindow(QQuickItem *window);
+    void removeWindow(QQuickItem *window);
 
-    FakeApplicationManagerWindow *m_mainWindow = 0;
-    QList<QQuickItem *> m_windows;
+    QObject *m_rootObject = nullptr;
+    QList<QQuickItem *> m_surfaces;
 
     friend class FakeApplicationManagerWindow; // for emitting signals on behalf of this class in onComplete
 #endif

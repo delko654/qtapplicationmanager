@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -40,6 +40,7 @@
 ****************************************************************************/
 
 #include <functional>
+#include <application.h>
 #include "plugincontainer.h"
 
 QT_BEGIN_NAMESPACE_AM
@@ -59,21 +60,15 @@ bool PluginContainerManager::supportsQuickLaunch() const
     return m_interface->supportsQuickLaunch();
 }
 
-AbstractContainer *PluginContainerManager::create()
+AbstractContainer *PluginContainerManager::create(const Application *app, const QVector<int> &stdioRedirections,
+                                                  const QMap<QString, QString> &debugWrapperEnvironment,
+                                                  const QStringList &debugWrapperCommand)
 {
-    auto containerInterface = m_interface->create();
+    auto containerInterface = m_interface->create(app == nullptr, stdioRedirections,
+                                                  debugWrapperEnvironment, debugWrapperCommand);
     if (!containerInterface)
         return nullptr;
-    return new PluginContainer(containerInterface, this);
-}
-
-AbstractContainer *PluginContainerManager::create(const ContainerDebugWrapper &debugWrapper)
-{
-    if (debugWrapper.isValid()) {
-        qCWarning(LogSystem()) << "Debug wrappers are currently not supported on external container plugins.";
-        return nullptr;
-    }
-    return create();
+    return new PluginContainer(this, app, containerInterface);
 }
 
 void PluginContainerManager::setConfiguration(const QVariantMap &configuration)
@@ -124,7 +119,7 @@ QString PluginContainer::mapHostPathToContainer(const QString &hostPath) const
     return m_interface->mapHostPathToContainer(hostPath);
 }
 
-AbstractContainerProcess *PluginContainer::start(const QStringList &arguments, const QProcessEnvironment &env)
+AbstractContainerProcess *PluginContainer::start(const QStringList &arguments, const QMap<QString, QString> &env)
 {
     if (m_startCalled)
         return nullptr;
@@ -136,8 +131,8 @@ AbstractContainerProcess *PluginContainer::start(const QStringList &arguments, c
     return nullptr;
 }
 
-PluginContainer::PluginContainer(ContainerInterface *containerInterface, AbstractContainerManager *manager)
-    : AbstractContainer(manager)
+PluginContainer::PluginContainer(AbstractContainerManager *manager, const Application *app, ContainerInterface *containerInterface)
+    : AbstractContainer(manager, app)
     , m_interface(containerInterface)
     , m_process(new PluginContainerProcess(this))
 {
@@ -148,6 +143,12 @@ PluginContainer::PluginContainer(ContainerInterface *containerInterface, Abstrac
     connect(containerInterface, &ContainerInterface::errorOccured, m_process, &PluginContainerProcess::errorOccured);
     connect(containerInterface, &ContainerInterface::finished, m_process, &PluginContainerProcess::finished);
     connect(containerInterface, &ContainerInterface::stateChanged, m_process, &PluginContainerProcess::stateChanged);
+
+    connect(this, &AbstractContainer::applicationChanged, this, [this]() {
+        m_interface->attachApplication(application()->toVariantMap());
+    });
+    if (application())
+        containerInterface->attachApplication(application()->toVariantMap());
 }
 
 PluginContainerProcess::PluginContainerProcess(PluginContainer *container)
@@ -163,16 +164,6 @@ qint64 PluginContainerProcess::processId() const
 QProcess::ProcessState PluginContainerProcess::state() const
 {
     return m_container->m_interface->state();
-}
-
-void PluginContainerProcess::setWorkingDirectory(const QString &dir)
-{
-    m_container->m_interface->setWorkingDirectory(dir);
-}
-
-void PluginContainerProcess::setProcessEnvironment(const QProcessEnvironment &environment)
-{
-    m_container->m_interface->setProcessEnvironment(environment);
 }
 
 void PluginContainerProcess::kill()

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -49,7 +49,9 @@
 
 #include "global.h"
 #include "qtyaml.h"
+#include "application.h"
 #include "utilities.h"
+#include "exception.h"
 #include "installationreport.h"
 
 QT_BEGIN_NAMESPACE_AM
@@ -137,7 +139,7 @@ QStringList InstallationReport::files() const
 
 void InstallationReport::addFile(const QString &file)
 {
-    m_files << file;
+    m_files << file.normalized(QString::NormalizationForm_C);
 }
 
 void InstallationReport::addFiles(const QStringList &files)
@@ -147,7 +149,7 @@ void InstallationReport::addFiles(const QStringList &files)
 
 bool InstallationReport::isValid() const
 {
-    return isValidDnsName(m_applicationId) && !m_digest.isEmpty() && !m_files.isEmpty();
+    return Application::isValidApplicationId(m_applicationId) && !m_digest.isEmpty() && !m_files.isEmpty();
 }
 
 bool InstallationReport::deserialize(QIODevice *from)
@@ -164,9 +166,9 @@ bool InstallationReport::deserialize(QIODevice *from)
     if (error.error != QJsonParseError::NoError)
         return false;
 
-    if ((docs.size() != 3)
-            || (docs.first().toMap().value(qSL("formatType")).toString() != qL1S("am-installation-report"))
-            || (docs.first().toMap().value(qSL("formatVersion")).toInt(0) != 1)) {
+    try {
+        checkYamlFormat(docs, 3 /*number of expected docs*/, { "am-installation-report" }, 1);
+    } catch (const Exception &) {
         return false;
     }
 

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,7 +41,6 @@
 
 #pragma once
 #include <qglobal.h>
-#include <QLoggingCategory>
 
 #define QT_BEGIN_NAMESPACE_AM  namespace QtAM {
 #define QT_END_NAMESPACE_AM    }
@@ -49,48 +48,11 @@
 #define QT_PREPEND_NAMESPACE_AM(name) QtAM::name
 
 QT_BEGIN_NAMESPACE_AM
-
-Q_DECLARE_LOGGING_CATEGORY(LogSystem)
-Q_DECLARE_LOGGING_CATEGORY(LogInstaller)
-Q_DECLARE_LOGGING_CATEGORY(LogWayland)
-Q_DECLARE_LOGGING_CATEGORY(LogQml)
-Q_DECLARE_LOGGING_CATEGORY(LogNotifications)
-Q_DECLARE_LOGGING_CATEGORY(LogQmlRuntime)
-Q_DECLARE_LOGGING_CATEGORY(LogQmlIpc)
-
-void registerUnregisteredDLTContexts();
-
-void colorLogToStderr(QtMsgType msgType, const QMessageLogContext &context, const QString &message);
-
-extern QByteArray colorLogApplicationId;
-
-QString hardwareId();
-
-void am_trace(QDebug);
-template <typename T, typename... TRest> void am_trace(QDebug dbg, T t, TRest... trest)
-{ dbg << t; am_trace(dbg, trest...); }
-
+// make sure the namespace exists
 QT_END_NAMESPACE_AM
-
-#define AM_TRACE(category, ...) \
-    for (bool qt_category_enabled = category().isDebugEnabled(); qt_category_enabled; qt_category_enabled = false) { \
-        QT_PREPEND_NAMESPACE_AM(am_trace(QMessageLogger(__FILE__, __LINE__, __FUNCTION__, category().categoryName()).debug(), "TRACE", __FUNCTION__, __VA_ARGS__)); \
-    }
 
 // make the source a lot less ugly and more readable (until we can finally use user defined literals)
 #define qL1S(x) QLatin1String(x)
 #define qL1C(x) QLatin1Char(x)
 #define qSL(x) QStringLiteral(x)
 
-#if QT_VERSION < QT_VERSION_CHECK(5, 7, 0)
-namespace QtPrivate {
-template <typename T> struct QAddConst { typedef const T Type; };
-}
-
-// this adds const to non-const objects (like std::as_const)
-template <typename T>
-Q_DECL_CONSTEXPR typename QtPrivate::QAddConst<T>::Type &qAsConst(T &t) Q_DECL_NOTHROW { return t; }
-// prevent rvalue arguments:
-template <typename T>
-void qAsConst(const T &&) Q_DECL_EQ_DELETE;
-#endif

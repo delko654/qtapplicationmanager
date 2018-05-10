@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -40,6 +40,7 @@
 #include "private/package_p.h"
 #include "runtimefactory.h"
 #include "qmlinprocessruntime.h"
+#include "package.h"
 
 #ifdef Q_OS_LINUX
 #  include <signal.h>
@@ -54,6 +55,8 @@ QT_USE_NAMESPACE_AM
 
 static bool startedSudoServer = false;
 static QString sudoServerError;
+
+static int spyTimeout = 5000; // shorthand for specifying QSignalSpy timeouts
 
 // RAII to reset the global attribute
 class AllowUnsignedInstallation
@@ -77,7 +80,7 @@ class tst_ApplicationInstaller : public QObject
     Q_OBJECT
 
 public:
-    tst_ApplicationInstaller(QObject *parent = 0);
+    tst_ApplicationInstaller(QObject *parent = nullptr);
     ~tst_ApplicationInstaller();
 
 private slots:
@@ -103,6 +106,12 @@ private slots:
 
     void cancelPackageInstallation_data();
     void cancelPackageInstallation();
+
+    void validateDnsName_data();
+    void validateDnsName();
+
+    void compareVersions_data();
+    void compareVersions();
 
 public:
     enum PathLocation {
@@ -213,21 +222,21 @@ private:
     }
 
 private:
-    SudoClient *m_root = 0;
+    SudoClient *m_root = nullptr;
 
-    TemporaryDir m_workDir;
+    QTemporaryDir m_workDir;
     QString m_hardwareId;
     QString m_loopbackForSDCard[2];
     QVector<InstallationLocation> m_installationLocations;
-    ApplicationInstaller *m_ai = 0;
-    QSignalSpy *m_startedSpy = 0;
-    QSignalSpy *m_requestingInstallationAcknowledgeSpy = 0;
-    QSignalSpy *m_blockingUntilInstallationAcknowledgeSpy = 0;
-    QSignalSpy *m_progressSpy = 0;
-    QSignalSpy *m_finishedSpy = 0;
-    QSignalSpy *m_failedSpy = 0;
-    QSignalSpy *m_packageActivatedSpy = 0;
-    QSignalSpy *m_packageDeactivatedSpy = 0;
+    ApplicationInstaller *m_ai = nullptr;
+    QSignalSpy *m_startedSpy = nullptr;
+    QSignalSpy *m_requestingInstallationAcknowledgeSpy = nullptr;
+    QSignalSpy *m_blockingUntilInstallationAcknowledgeSpy = nullptr;
+    QSignalSpy *m_progressSpy = nullptr;
+    QSignalSpy *m_finishedSpy = nullptr;
+    QSignalSpy *m_failedSpy = nullptr;
+    QSignalSpy *m_packageActivatedSpy = nullptr;
+    QSignalSpy *m_packageDeactivatedSpy = nullptr;
 };
 
 
@@ -242,7 +251,7 @@ tst_ApplicationInstaller::~tst_ApplicationInstaller()
         if (m_root)
             m_root->removeRecursive(m_workDir.path());
         else
-            recursiveOperation(m_workDir.path(), SafeRemove());
+            recursiveOperation(m_workDir.path(), safeRemove);
     }
 
     delete m_packageDeactivatedSpy;
@@ -259,10 +268,17 @@ tst_ApplicationInstaller::~tst_ApplicationInstaller()
 
 void tst_ApplicationInstaller::initTestCase()
 {
-    if (!qgetenv("VERBOSE_TEST").toInt())
-        QLoggingCategory::setFilterRules("am.installer.debug=false");
+    if (!QDir(qL1S(AM_TESTDATA_DIR "/packages")).exists())
+        QSKIP("No test packages available in the data/ directory");
 
-    QVERIFY(checkCorrectLocale());
+    bool verbose = qEnvironmentVariableIsSet("VERBOSE_TEST");
+    if (!verbose)
+        QLoggingCategory::setFilterRules("am.installer.debug=false");
+    qInfo() << "Verbose mode is" << (verbose ? "on" : "off") << "(changed by (un)setting $VERBOSE_TEST)";
+
+    spyTimeout *= timeoutFactor();
+
+    QVERIFY(Package::checkCorrectLocale());
     QVERIFY2(startedSudoServer, qPrintable(sudoServerError));
     m_root = SudoClient::instance();
     QVERIFY(m_root);
@@ -270,16 +286,14 @@ void tst_ApplicationInstaller::initTestCase()
     // we need a (dummy) ApplicationManager for the installer, since the installer will
     // notify the manager during installations
     QString errorString;
-    QVERIFY2(ApplicationManager::createInstance(0, true, &errorString), qPrintable(errorString));
+    QVERIFY2(ApplicationManager::createInstance(nullptr, true, &errorString), qPrintable(errorString));
 
     // create a temporary dir (plus sub-dirs) for everything created by this test run
 
     QVERIFY(m_workDir.isValid());
 
     // make sure we have a valid hardware-id
-
-    m_hardwareId = hardwareId();
-    QVERIFY(!m_hardwareId.isEmpty());
+    m_hardwareId = "foobar";
 
     for (int i = 0; i < PathLocationCount; ++i)
         QVERIFY(QDir().mkdir(pathTo(PathLocation(i))));
@@ -303,7 +317,7 @@ void tst_ApplicationInstaller::initTestCase()
         // those paths have been hidden due to the mount, so recreate them
         QVERIFY(QDir().mkdir(pathTo(i == 0 ? SDCard0Images : SDCard1Images)));
     };
- #endif // Q_OS_LINUX
+#endif // Q_OS_LINUX
 
     // define some installation locations for testing
 
@@ -333,7 +347,7 @@ void tst_ApplicationInstaller::initTestCase()
             { "documentPath", pathTo(Documents1) },
         }
 #endif // Q_OS_LINUX
-    });
+    }, m_hardwareId);
 
 #ifdef Q_OS_LINUX
     QCOMPARE(m_installationLocations.size(), 4);
@@ -402,9 +416,14 @@ void tst_ApplicationInstaller::cleanup()
     // this helps with reducing the amount of cleanup work required
     // at the end of each test
 
-    m_ai->cleanupBrokenInstallations();
+    try {
+        m_ai->cleanupBrokenInstallations();
+    } catch (const Exception &e) {
+        QFAIL(e.what());
+    }
+
     clearSignalSpies();
-    recursiveOperation(pathTo(Internal0), SafeRemove());
+    recursiveOperation(pathTo(Internal0), safeRemove);
 }
 
 void tst_ApplicationInstaller::installationLocations()
@@ -417,10 +436,10 @@ void tst_ApplicationInstaller::installationLocations()
         QVERIFY(InstallationLocation::typeFromString(s) == i);
     }
 
-    QVector<InstallationLocation> loclist = m_ai->installationLocations();
+    const QVector<InstallationLocation> loclist = m_ai->installationLocations();
 
     QCOMPARE(loclist.size(), m_installationLocations.size());
-    foreach (const InstallationLocation &loc, loclist) {
+    for (const InstallationLocation &loc : loclist) {
         QVERIFY(m_installationLocations.contains(loc));
 
         QCOMPARE(loc.id(), InstallationLocation::typeToString(loc.type()) + "-" + QString::number(loc.index()));
@@ -433,7 +452,7 @@ void tst_ApplicationInstaller::installationLocations()
             { "documentPath", QDir::tempPath() },
             { "isDefault", true }
         },
-    });
+    }, m_hardwareId);
     QCOMPARE(locationList.size(), 1);
     InstallationLocation &tmp = locationList.first();
     QVariantMap map = tmp.toVariantMap();
@@ -473,7 +492,7 @@ void tst_ApplicationInstaller::packageActivation()
 
     // check received signals
 
-    QVERIFY(m_finishedSpy->wait());
+    QVERIFY(m_finishedSpy->wait(spyTimeout));
     QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
     clearSignalSpies();
 
@@ -516,7 +535,7 @@ void tst_ApplicationInstaller::packageActivation()
 
     taskId = m_ai->removePackage(name, false);
     QVERIFY(!taskId.isEmpty());
-    QVERIFY(m_finishedSpy->wait());
+    QVERIFY(m_finishedSpy->wait(spyTimeout));
     QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
 }
 
@@ -549,19 +568,22 @@ void tst_ApplicationInstaller::packageInstallation_data()
             << false << false << false << "could not find info.yaml and icon.png at the beginning of the package";
     QTest::newRow("invalid-header-format") \
             << "test-invalid-header-formatversion.appkg" << "internal-0" << "" << ""
-            << false << false << false << "metadata has an invalid format specification";
+            << false << false << false << "metadata has an invalid format specification: wrong formatVersion header: expected 1, got 2";
     QTest::newRow("invalid-header-diskspaceused") \
             << "test-invalid-header-diskspaceused.appkg" << "internal-0" << "" << ""
             << false << false << false << "metadata has an invalid diskSpaceUsed field (0)";
     QTest::newRow("invalid-header-id") \
             << "test-invalid-header-id.appkg" << "internal-0" << "" << ""
-            << false << false << false << "metadata has an invalid applicationId field (invalid)";
+            << false << false << false << "metadata has an invalid applicationId field (:invalid)";
+    QTest::newRow("non-matching-header-id") \
+            << "test-non-matching-header-id.appkg" << "internal-0" << "" << ""
+            << false << false << false << "the application identifiers in --PACKAGE-HEADER--' and info.yaml do not match";
     QTest::newRow("invalid-info.yaml") \
             << "test-invalid-info.appkg" << "internal-0" << "" << ""
             << false << false << false << "~.*YAML parse error at line \\d+, column \\d+: did not find expected key";
     QTest::newRow("invalid-info.yaml-id") \
             << "test-invalid-info-id.appkg" << "internal-0" << "" << ""
-            << false << false << false << "~.*the identifier \\(invalid\\) is not a valid reverse-DNS name: the minimum amount of parts \\(subdomains\\) is 3 \\(found 1\\)";
+            << false << false << false << "~.*the identifier \\(:invalid\\) is not a valid application-id: must consist of printable ASCII characters only, except any of .*";
     QTest::newRow("invalid-footer-signature") \
             << "test-invalid-footer-signature.appkg" << "internal-0" << "" << ""
             << false << false << false << "could not verify the package's developer signature";
@@ -620,14 +642,14 @@ void tst_ApplicationInstaller::packageInstallation()
         if (pass == 1 ? !expectedSuccess : !updateExpectedSuccess) {
             // ...in case of expected failure
 
-            QVERIFY(m_failedSpy->wait());
+            QVERIFY(m_failedSpy->wait(spyTimeout));
             QCOMPARE(m_failedSpy->first()[0].toString(), taskId);
 
             AM_CHECK_ERRORSTRING(m_failedSpy->first()[2].toString(), errorString);
         } else {
             // ...in case of expected success
 
-            QVERIFY(m_finishedSpy->wait());
+            QVERIFY(m_finishedSpy->wait(spyTimeout));
             QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
             QVERIFY(!m_progressSpy->isEmpty());
             QCOMPARE(m_progressSpy->last()[0].toString(), taskId);
@@ -684,7 +706,7 @@ void tst_ApplicationInstaller::packageInstallation()
 
             // check signals
 
-            QVERIFY(m_finishedSpy->wait());
+            QVERIFY(m_finishedSpy->wait(spyTimeout));
             QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
         }
         clearSignalSpies();
@@ -712,7 +734,7 @@ void tst_ApplicationInstaller::removeAppOnMissingSDCard()
 
     // check received signals
 
-    QVERIFY(m_finishedSpy->wait());
+    QVERIFY(m_finishedSpy->wait(spyTimeout));
     QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
     clearSignalSpies();
 
@@ -730,7 +752,7 @@ void tst_ApplicationInstaller::removeAppOnMissingSDCard()
 
     taskId = m_ai->removePackage("com.pelagicore.test", false);
     QVERIFY(!taskId.isEmpty());
-    QVERIFY(m_failedSpy->wait());
+    QVERIFY(m_failedSpy->wait(spyTimeout));
     QCOMPARE(m_failedSpy->first()[0].toString(), taskId);
     QCOMPARE(m_failedSpy->first()[2].toString(), QString::fromLatin1("cannot delete application com.pelagicore.test without the removable medium it was installed on"));
     clearSignalSpies();
@@ -742,7 +764,7 @@ void tst_ApplicationInstaller::removeAppOnMissingSDCard()
 
     taskId = m_ai->removePackage("com.pelagicore.test", false, true /*force*/);
     QVERIFY(!taskId.isEmpty());
-    QVERIFY(m_finishedSpy->wait());
+    QVERIFY(m_finishedSpy->wait(spyTimeout));
     QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
     clearSignalSpies();
 
@@ -802,8 +824,8 @@ void tst_ApplicationInstaller::simulateErrorConditions_data()
 
      QTest::newRow("sdcard-unmounted-while-installing") \
              << "removable-0" << false << "removable medium removable-0 is not mounted" \
-             << FunctionMap { { "after-start", [this]() { return m_requestingInstallationAcknowledgeSpy->wait()
-                                                                     && m_blockingUntilInstallationAcknowledgeSpy->wait()
+             << FunctionMap { { "after-start", [this]() { return m_requestingInstallationAcknowledgeSpy->wait(spyTimeout)
+                                                                     && m_blockingUntilInstallationAcknowledgeSpy->wait(spyTimeout)
                                                                      && m_root->unmount(pathTo(SDCard0), true); } },
                               { "after-failed", [this]() { return m_root->mount(m_loopbackForSDCard[0], pathTo(SDCard0), false, "vfat"); } } };
 
@@ -829,7 +851,7 @@ void tst_ApplicationInstaller::simulateErrorConditions()
         taskId = m_ai->startPackageInstallation(installationLocation, QUrl::fromLocalFile(AM_TESTDATA_DIR "packages/test-dev-signed.appkg"));
         QVERIFY(!taskId.isEmpty());
         m_ai->acknowledgePackageInstallation(taskId);
-        QVERIFY(m_finishedSpy->wait());
+        QVERIFY(m_finishedSpy->wait(spyTimeout));
         QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
         clearSignalSpies();
     }
@@ -844,7 +866,7 @@ void tst_ApplicationInstaller::simulateErrorConditions()
 
     m_ai->acknowledgePackageInstallation(taskId);
 
-    QVERIFY(m_failedSpy->wait());
+    QVERIFY(m_failedSpy->wait(spyTimeout));
     QCOMPARE(m_failedSpy->first()[0].toString(), taskId);
     AM_CHECK_ERRORSTRING(m_failedSpy->first()[2].toString(), errorString);
     clearSignalSpies();
@@ -855,7 +877,7 @@ void tst_ApplicationInstaller::simulateErrorConditions()
     if (testUpdate) {
         taskId = m_ai->removePackage("com.pelagicore.test", false);
 
-        QVERIFY(m_finishedSpy->wait());
+        QVERIFY(m_finishedSpy->wait(spyTimeout));
         QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
     }
 }
@@ -883,23 +905,23 @@ void tst_ApplicationInstaller::cancelPackageInstallation()
     if (isDataTag("before-started-signal")) {
         QCOMPARE(m_ai->cancelTask(taskId), expectedResult);
     } else if (isDataTag("after-started-signal")) {
-        QVERIFY(m_startedSpy->wait());
+        QVERIFY(m_startedSpy->wait(spyTimeout));
         QCOMPARE(m_startedSpy->first()[0].toString(), taskId);
         QCOMPARE(m_ai->cancelTask(taskId), expectedResult);
     } else if (isDataTag("after-blocking-until-installation-acknowledge-signal")) {
-        QVERIFY(m_blockingUntilInstallationAcknowledgeSpy->wait());
+        QVERIFY(m_blockingUntilInstallationAcknowledgeSpy->wait(spyTimeout));
         QCOMPARE(m_blockingUntilInstallationAcknowledgeSpy->first()[0].toString(), taskId);
         QCOMPARE(m_ai->cancelTask(taskId), expectedResult);
     } else if (isDataTag("after-finished-signal")) {
         m_ai->acknowledgePackageInstallation(taskId);
-        QVERIFY(m_finishedSpy->wait());
+        QVERIFY(m_finishedSpy->wait(spyTimeout));
         QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
         QCOMPARE(m_ai->cancelTask(taskId), expectedResult);
     }
 
     if (expectedResult) {
         if (!m_startedSpy->isEmpty()) {
-            QVERIFY(m_failedSpy->wait());
+            QVERIFY(m_failedSpy->wait(spyTimeout));
             QCOMPARE(m_failedSpy->first()[0].toString(), taskId);
             QCOMPARE(m_failedSpy->first()[1].toInt(), int(Error::Canceled));
         }
@@ -908,17 +930,17 @@ void tst_ApplicationInstaller::cancelPackageInstallation()
 
         taskId = m_ai->removePackage("com.pelagicore.test", false);
         QVERIFY(!taskId.isEmpty());
-        QVERIFY(m_finishedSpy->wait());
+        QVERIFY(m_finishedSpy->wait(spyTimeout));
         QCOMPARE(m_finishedSpy->first()[0].toString(), taskId);
     }
 }
 
 
-static tst_ApplicationInstaller *tstApplicationInstaller = 0;
+static tst_ApplicationInstaller *tstApplicationInstaller = nullptr;
 
 int main(int argc, char **argv)
 {
-    ensureCorrectLocale();
+    Package::ensureCorrectLocale();
 
     startedSudoServer = forkSudoServer(DropPrivilegesPermanently, &sudoServerError);
 
@@ -945,5 +967,93 @@ int main(int argc, char **argv)
     return QTest::qExec(tstApplicationInstaller, argc, argv);
 }
 
+void tst_ApplicationInstaller::validateDnsName_data()
+{
+    QTest::addColumn<QString>("dnsName");
+    QTest::addColumn<int>("minParts");
+    QTest::addColumn<bool>("valid");
+
+    // passes
+    QTest::newRow("normal") << "com.pelagicore.test" << 3 << true;
+    QTest::newRow("shortest") << "c.p.t" << 3 << true;
+    QTest::newRow("valid-chars") << "1-2.c-d.3.z" << 3 << true;
+    QTest::newRow("longest-part") << "com.012345678901234567890123456789012345678901234567890123456789012.test" << 3 << true;
+    QTest::newRow("longest-name") << "com.012345678901234567890123456789012345678901234567890123456789012.012345678901234567890123456789012345678901234567890123456789012.0123456789012.test" << 3 << true;
+    QTest::newRow("max-part-cnt") << "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.0.1.2.3.4.5.6.7.8.9.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.0.1.2.3.4.5.6.7.8.9.a.0.12" << 3 << true;
+    QTest::newRow("one-part-only") << "c" << 1 << true;
+
+    // failures
+    QTest::newRow("too-few-parts") << "com.pelagicore" << 3 << false;
+    QTest::newRow("empty-part") << "com..test" << 3 << false;
+    QTest::newRow("empty") << "" << 3 << false;
+    QTest::newRow("dot-only") << "." << 3 << false;
+    QTest::newRow("invalid-char1") << "com.pelagi_core.test" << 3 << false;
+    QTest::newRow("invalid-char2") << "com.pelagi#core.test" << 3 << false;
+    QTest::newRow("invalid-char3") << "com.pelagi$core.test" << 3 << false;
+    QTest::newRow("invalid-char3") << "com.pelagi@core.test" << 3 << false;
+    QTest::newRow("unicode-char") << QString::fromUtf8("c\xc3\xb6m.pelagicore.test") << 3 << false;
+    QTest::newRow("upper-case") << "com.Pelagicore.test" << 3 << false;
+    QTest::newRow("dash-at-start") << "com.-pelagicore.test" << 3 << false;
+    QTest::newRow("dash-at-end") << "com.pelagicore-.test" << 3 << false;
+    QTest::newRow("part-too-long") << "com.x012345678901234567890123456789012345678901234567890123456789012.test" << 3 << false;
+}
+
+void tst_ApplicationInstaller::validateDnsName()
+{
+    QFETCH(QString, dnsName);
+    QFETCH(int, minParts);
+    QFETCH(bool, valid);
+
+    QString errorString;
+    bool result = m_ai->validateDnsName(dnsName, minParts);
+
+    QVERIFY2(valid == result, qPrintable(errorString));
+}
+
+void tst_ApplicationInstaller::compareVersions_data()
+{
+    QTest::addColumn<QString>("version1");
+    QTest::addColumn<QString>("version2");
+    QTest::addColumn<int>("result");
+
+
+    QTest::newRow("1") << "" << "" << 0;
+    QTest::newRow("2") << "0" << "0" << 0;
+    QTest::newRow("3") << "foo" << "foo" << 0;
+    QTest::newRow("4") << "1foo" << "1foo" << 0;
+    QTest::newRow("5") << "foo1" << "foo1" << 0;
+    QTest::newRow("6") << "13.403.51-alpha2+git" << "13.403.51-alpha2+git" << 0;
+    QTest::newRow("7") << "1" << "2" << -1;
+    QTest::newRow("8") << "2" << "1" << 1;
+    QTest::newRow("9") << "1.0" << "2.0" << -1;
+    QTest::newRow("10") << "1.99" << "2.0" << -1;
+    QTest::newRow("11") << "1.9" << "11" << -1;
+    QTest::newRow("12") << "9" << "10" << -1;
+    QTest::newRow("12") << "9a" << "10" << -1;
+    QTest::newRow("13") << "9-a" << "10" << -1;
+    QTest::newRow("14") << "13.403.51-alpha2+gi" << "13.403.51-alpha2+git" << -1;
+    QTest::newRow("15") << "13.403.51-alpha1+git" << "13.403.51-alpha2+git" << -1;
+    QTest::newRow("16") << "13.403.51-alpha2+git" << "13.403.51-beta1+git" << -1;
+    QTest::newRow("17") << "13.403.51-alpha2+git" << "13.403.52" << -1;
+    QTest::newRow("18") << "13.403.51-alpha2+git" << "13.403.52-alpha2+git" << -1;
+    QTest::newRow("19") << "13.403.51-alpha2+git" << "13.404" << -1;
+    QTest::newRow("20") << "13.402" << "13.403.51-alpha2+git" << -1;
+    QTest::newRow("21") << "12.403.51-alpha2+git" << "13.403.51-alpha2+git" << -1;
+}
+
+void tst_ApplicationInstaller::compareVersions()
+{
+    QFETCH(QString, version1);
+    QFETCH(QString, version2);
+    QFETCH(int, result);
+
+    int cmp = m_ai->compareVersions(version1, version2);
+    QCOMPARE(cmp, result);
+
+    if (result) {
+        cmp = m_ai->compareVersions(version2, version1);
+        QCOMPARE(cmp, -result);
+    }
+}
 
 #include "tst_applicationinstaller.moc"

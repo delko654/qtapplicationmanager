@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -56,7 +56,6 @@
 #include "exception.h"
 #include "error.h"
 #include "installationreport.h"
-#include "utilities.h"
 #include "qtyaml.h"
 
 #ifndef S_IREAD
@@ -90,6 +89,11 @@ PackageCreator::PackageCreator(const QDir &sourceDir, QIODevice *output, const I
     setSourceDirectory(sourceDir);
 }
 
+PackageCreator::~PackageCreator()
+{
+    delete d;
+}
+
 QDir PackageCreator::sourceDirectory() const
 {
     return QDir(d->m_sourcePath);
@@ -111,6 +115,11 @@ bool PackageCreator::create()
 QByteArray PackageCreator::createdDigest() const
 {
     return d->m_digest;
+}
+
+QVariantMap PackageCreator::metaData() const
+{
+    return d->m_metaData;
 }
 
 bool PackageCreator::hasFailed() const
@@ -154,12 +163,12 @@ PackageCreatorPrivate::PackageCreatorPrivate(PackageCreator *creator, QIODevice 
 
 bool PackageCreatorPrivate::create()
 {
-    struct archive *ar = 0;
+    struct archive *ar = nullptr;
     char buffer[64 * 1024];
 
     try {
         if (m_report.applicationId().isNull())
-            throw Exception(Error::System, "package identifier is null");
+            throw Exception("package identifier is null");
 
         QCryptographicHash digest(QCryptographicHash::Sha256);
 
@@ -207,6 +216,8 @@ bool PackageCreatorPrivate::create()
         if (!addVirtualFile(ar, qSL("--PACKAGE-HEADER--"), QtYaml::yamlFromVariantDocuments(QVector<QVariant> { headerFormat, headerData })))
             throw ArchiveException(ar, "could not write '--PACKAGE-HEADER--' to archive");
 
+        m_metaData = headerData;
+
         // Add all regular files
 
         QStringList allFiles = m_report.files();
@@ -214,7 +225,7 @@ bool PackageCreatorPrivate::create()
         // Calculate the total size first, so we can report progress later on
 
         qint64 allFilesSize = 0;
-        foreach (const QString &file, allFiles) {
+        for (const QString &file : qAsConst(allFiles)) {
             QFileInfo fi(m_sourcePath + file);
 
             if (!fi.exists())
@@ -227,7 +238,7 @@ bool PackageCreatorPrivate::create()
 
         // Iterate over all files in the report
 
-        foreach (const QString &file, allFiles) {
+        for (const QString &file : qAsConst(allFiles)) {
             if (q->wasCanceled())
                 throw Exception(Error::Canceled);
 
@@ -245,6 +256,15 @@ bool PackageCreatorPrivate::create()
             } else if (fi.isFile() && !fi.isSymLink()) {
                 packageEntryType = PackageEntry_File;
                 mode = S_IFREG | S_IREAD | (fi.permission(QFile::ExeOwner) ? S_IEXEC : 0);
+#if defined(Q_OS_WIN)
+                // We do not have x-bits for stuff that has been cross-compiled on Windows,
+                // so this crude hack sets the x-bit in the package for all ELF files.
+                QFile f(fi.absoluteFilePath());
+                if (f.open(QFile::ReadOnly)) {
+                    if (f.read(4) == "\x7f""ELF")
+                        mode |= S_IEXEC;
+                }
+#endif
             } else {
                 throw Exception(Error::Package, "inode '%1' is neither a directory or a file").arg(fi.filePath());
             }
@@ -323,12 +343,16 @@ bool PackageCreatorPrivate::create()
         if (!addVirtualFile(ar, qSL("--PACKAGE-FOOTER--"), QtYaml::yamlFromVariantDocuments(QVector<QVariant> { footerFormat, footerData })))
             throw ArchiveException(ar, "could not add '--PACKAGE-FOOTER--' to archive");
 
+        m_metaData.unite(footerData);
+
         if (!m_report.developerSignature().isEmpty()) {
             QVariantMap footerDevSig {
                 { qSL("developerSignature"), QLatin1String(m_report.developerSignature().toBase64()) }
             };
             if (!addVirtualFile(ar, qSL("--PACKAGE-FOOTER--"), QtYaml::yamlFromVariantDocuments(QVector<QVariant> { footerDevSig })))
                 throw ArchiveException(ar, "could not add '--PACKAGE-FOOTER--' to archive");
+
+            m_metaData.unite(footerDevSig);
         }
         if (!m_report.storeSignature().isEmpty()) {
             QVariantMap footerStoreSig {
@@ -336,6 +360,8 @@ bool PackageCreatorPrivate::create()
             };
             if (!addVirtualFile(ar, qSL("--PACKAGE-FOOTER--"), QtYaml::yamlFromVariantDocuments(QVector<QVariant> { footerStoreSig })))
                 throw ArchiveException(ar, "could not add '--PACKAGE-FOOTER--' to archive");
+
+            m_metaData.unite(footerStoreSig);
         }
 
         if (archive_write_free(ar) != ARCHIVE_OK)

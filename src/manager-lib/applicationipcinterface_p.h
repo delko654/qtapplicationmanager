@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -45,6 +45,7 @@
 #include <QVector>
 #include <QMap>
 #include <QPointer>
+#include <QVariant>
 #if defined(QT_DBUS_LIB)
 #  include <QDBusVirtualObject>
 #endif
@@ -55,7 +56,7 @@ QT_BEGIN_NAMESPACE_AM
 class Application;
 class IpcProxySignalRelay;
 
-class IpcProxyObject
+class IpcProxyObject // clazy:exclude=missing-qobject-macro
 #if defined(QT_DBUS_LIB)
         : protected QDBusVirtualObject
 #else
@@ -116,7 +117,7 @@ private:
     friend class ApplicationIPCInterfaceAttached;
 };
 
-class IpcProxySignalRelay : public QObject
+class IpcProxySignalRelay : public QObject // clazy:exclude=missing-qobject-macro
 {
 public:
     IpcProxySignalRelay(IpcProxyObject *proxyObject);

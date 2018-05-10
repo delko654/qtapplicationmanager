@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,10 +41,9 @@
 
 #pragma once
 
+#include <QtAppManCommon/global.h>
 #include <QString>
 #include <QVariantMap>
-
-#include <QtAppManCommon/exception.h>
 
 QT_BEGIN_NAMESPACE_AM
 
@@ -69,6 +68,9 @@ public:
     QString installationPath() const;
     QString documentPath() const;
 
+    bool installationDeviceFreeSpace(quint64 *bytesTotal, quint64 *bytesFree) const;
+    bool documentDeviceFreeSpace(quint64 *bytesTotal, quint64 *bytesFree) const;
+
     bool isValid() const;
     bool isDefault() const;
     bool isRemovable() const;
@@ -81,7 +83,8 @@ public:
     static Type typeFromString(const QString &str);
     static QString typeToString(Type type);
 
-    static QVector<InstallationLocation> parseInstallationLocations(const QVariantList &list) throw (Exception);
+    static QVector<InstallationLocation> parseInstallationLocations(const QVariantList &list,
+                                                                    const QString &hardwareId) Q_DECL_NOEXCEPT_EXPR(false);
 
 private:
     Type m_type = Invalid;

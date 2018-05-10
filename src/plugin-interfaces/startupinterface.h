@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -41,12 +41,7 @@
 
 #pragma once
 
-#include <exception>
 #include <QObject>
-
-#if defined(Q_CC_MSVC)
-#  pragma warning(disable: 4290)
-#endif
 
 QT_FORWARD_DECLARE_CLASS(QQmlEngine)
 QT_FORWARD_DECLARE_CLASS(QWindow)
@@ -56,14 +51,14 @@ class StartupInterface
 public:
     virtual ~StartupInterface();
 
-    virtual void initialize(const QVariantMap &additionalConfiguration) throw(std::exception) = 0;
+    virtual void initialize(const QVariantMap &systemProperties) Q_DECL_NOEXCEPT_EXPR(false) = 0;
 
-    virtual void afterRuntimeRegistration() throw(std::exception) = 0;
-    virtual void beforeQmlEngineLoad(QQmlEngine *engine) throw(std::exception) = 0;
-    virtual void afterQmlEngineLoad(QQmlEngine *engine) throw(std::exception) = 0;
+    virtual void afterRuntimeRegistration() Q_DECL_NOEXCEPT_EXPR(false) = 0;
+    virtual void beforeQmlEngineLoad(QQmlEngine *engine) Q_DECL_NOEXCEPT_EXPR(false) = 0;
+    virtual void afterQmlEngineLoad(QQmlEngine *engine) Q_DECL_NOEXCEPT_EXPR(false) = 0;
 
-    virtual void beforeWindowShow(QWindow *window) throw(std::exception) = 0;
-    virtual void afterWindowShow(QWindow *window) throw(std::exception) = 0;
+    virtual void beforeWindowShow(QWindow *window) Q_DECL_NOEXCEPT_EXPR(false) = 0;
+    virtual void afterWindowShow(QWindow *window) Q_DECL_NOEXCEPT_EXPR(false) = 0;
 };
 
 #define AM_StartupInterface_iid "io.qt.ApplicationManager.StartupInterface"

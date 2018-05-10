@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -64,12 +64,12 @@ class TestStartupInterface : public QObject, public StartupInterface
 
 public:
     // StartupInterface
-    void initialize(const QVariantMap &additionalConfiguration) throw(std::exception) override;
-    void afterRuntimeRegistration() throw(std::exception) override;
+    void initialize(const QVariantMap &systemProperties) Q_DECL_NOEXCEPT_EXPR(false) override;
+    void afterRuntimeRegistration() Q_DECL_NOEXCEPT_EXPR(false) override;
 
-    void beforeQmlEngineLoad(QQmlEngine *engine) throw(std::exception) override;
-    void afterQmlEngineLoad(QQmlEngine *engine) throw(std::exception) override;
+    void beforeQmlEngineLoad(QQmlEngine *engine) Q_DECL_NOEXCEPT_EXPR(false) override;
+    void afterQmlEngineLoad(QQmlEngine *engine) Q_DECL_NOEXCEPT_EXPR(false) override;
 
-    void beforeWindowShow(QWindow *window) throw(std::exception) override;
-    void afterWindowShow(QWindow *window) throw(std::exception) override;
+    void beforeWindowShow(QWindow *window) Q_DECL_NOEXCEPT_EXPR(false) override;
+    void afterWindowShow(QWindow *window) Q_DECL_NOEXCEPT_EXPR(false) override;
 };

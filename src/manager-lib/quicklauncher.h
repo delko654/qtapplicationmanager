@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -50,6 +50,7 @@ QT_BEGIN_NAMESPACE_AM
 
 class AbstractContainer;
 class AbstractRuntime;
+class CpuReader;
 
 class QuickLauncher : public QObject
 {
@@ -63,13 +64,19 @@ public:
 
     QPair<AbstractContainer *, AbstractRuntime *> take(const QString &containerId, const QString &runtimeId);
 
-    void killAll();
+    void shutDown();
 
 public slots:
     void rebuild();
 
+signals:
+    void shutDownFinished();
+
+protected:
+    void timerEvent(QTimerEvent *te) override;
+
 private:
-    QuickLauncher(QObject *parent = 0);
+    QuickLauncher(QObject *parent = nullptr);
     QuickLauncher(const QuickLauncher &);
     QuickLauncher &operator=(const QuickLauncher &);
     static QuickLauncher *s_instance;
@@ -86,7 +93,11 @@ private:
     };
 
     QVector<QuickLaunchEntry> m_quickLaunchPool;
-    bool m_onlyRebuildWhenIdle = false;
+    int m_idleTimerId = 0;
+    CpuReader *m_idleCpu = nullptr;
+    bool m_isIdle = false;
+    qreal m_idleThreshold;
+    bool m_shuttingDown = false;
 };
 
 QT_END_NAMESPACE_AM

@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -66,7 +66,8 @@ public:
 };
 
 
-QByteArray SignaturePrivate::create(const QByteArray &signingCertificatePkcs12, const QByteArray &signingCertificatePassword) throw(Exception)
+QByteArray SignaturePrivate::create(const QByteArray &signingCertificatePkcs12,
+                                    const QByteArray &signingCertificatePassword) Q_DECL_NOEXCEPT_EXPR(false)
 {
     QCFType<SecKeychainRef> localKeyChain;
 
@@ -136,7 +137,8 @@ QByteArray SignaturePrivate::create(const QByteArray &signingCertificatePkcs12, 
     }
 }
 
-bool SignaturePrivate::verify(const QByteArray &signaturePkcs7, const QList<QByteArray> &chainOfTrust) throw(Exception)
+bool SignaturePrivate::verify(const QByteArray &signaturePkcs7,
+                              const QList<QByteArray> &chainOfTrust) Q_DECL_NOEXCEPT_EXPR(false)
 {
     OSStatus err;
 
@@ -157,7 +159,7 @@ bool SignaturePrivate::verify(const QByteArray &signaturePkcs7, const QList<QByt
         throw SecurityException(err, "Could not set PKCS#7 signature detached content");
 
     QCFType<CFMutableArrayRef> caCerts = CFArrayCreateMutable(nullptr, 0, nullptr);
-    foreach (const QByteArray &trustedCert, chainOfTrust) {
+    for (const QByteArray &trustedCert : chainOfTrust) {
         QCFType<CFArrayRef> certs;
         SecExternalFormat itemFormat = kSecFormatUnknown; // X509Cert;
         SecExternalItemType itemType = kSecItemTypeUnknown; //Certificate;

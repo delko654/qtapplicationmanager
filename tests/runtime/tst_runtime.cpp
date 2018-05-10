@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 Pelagicore AG
+** Copyright (C) 2018 Pelagicore AG
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the Pelagicore Application Manager.
@@ -33,6 +33,7 @@
 #include "yamlapplicationscanner.h"
 #include "abstractruntime.h"
 #include "runtimefactory.h"
+#include "exception.h"
 
 QT_USE_NAMESPACE_AM
 
@@ -56,35 +57,27 @@ class TestRuntime : public AbstractRuntime
 public:
     explicit TestRuntime(AbstractContainer *container, const Application *app, AbstractRuntimeManager *manager)
         : AbstractRuntime(container, app, manager)
-        , m_running(false)
     { }
 
-    State state() const
-    {
-        return m_running ? Active : Inactive;
-    }
+    void setSlowAnimations(bool) override {}
 
     qint64 applicationProcessId() const
     {
-        return m_running ? 1 : 0;
+        return m_state == AbstractRuntime::Active ? 1 : 0;
     }
 
 public slots:
     bool start()
     {
-        m_running = true;
+        m_state = AbstractRuntime::Active;
         return true;
     }
 
     void stop(bool forceKill)
     {
         Q_UNUSED(forceKill);
-        m_running = false;
+        m_state = AbstractRuntime::Inactive;
     }
-
-private:
-    bool m_running;
-
 };
 
 class TestRuntimeManager : public AbstractRuntimeManager
@@ -124,7 +117,7 @@ void tst_Runtime::factory()
     QVERIFY(rf->registerRuntime(new TestRuntimeManager(qSL("foo"), qApp)));
     QVERIFY(rf->runtimeIds() == QStringList() << qSL("foo"));
 
-    QVERIFY(!rf->create(0, 0));
+    QVERIFY(!rf->create(nullptr, nullptr));
 
     QByteArray yaml =
             "formatVersion: 1\n"
@@ -141,7 +134,6 @@ void tst_Runtime::factory()
     QCOMPARE(temp.write(yaml), yaml.size());
     temp.close();
 
-    QString error;
     Application *a = nullptr;
     try {
         a = YamlApplicationScanner().scan(temp.fileName());
@@ -150,7 +142,7 @@ void tst_Runtime::factory()
     }
     QVERIFY(a);
 
-    AbstractRuntime *r = rf->create(0, a);
+    AbstractRuntime *r = rf->create(nullptr, a);
     QVERIFY(r);
     QVERIFY(r->application() == a);
     QVERIFY(r->manager()->inProcess());
@@ -161,7 +153,7 @@ void tst_Runtime::factory()
         QVERIFY(!r->inProcessQmlEngine());
         r->setInProcessQmlEngine(engine.data());
         QVERIFY(r->inProcessQmlEngine() == engine.data());
-        r->setInProcessQmlEngine(0);
+        r->setInProcessQmlEngine(nullptr);
     }
     QVERIFY(r->start());
     QVERIFY(r->state() == AbstractRuntime::Active);
@@ -172,6 +164,7 @@ void tst_Runtime::factory()
 
     delete r;
     delete rf;
+    delete a;
 }
 
 QTEST_MAIN(tst_Runtime)

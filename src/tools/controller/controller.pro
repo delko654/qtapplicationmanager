@@ -9,17 +9,14 @@ QT *= appman_common-private
 CONFIG *= console
 
 SOURCES +=  \
-    main.cpp \
+    controller.cpp \
 
-appmanif.files =  ../../dbus/io.qt.applicationmanager.xml
+appmanif.files =  ../../dbus-lib/io.qt.applicationmanager.xml
 appmanif.header_flags = -i dbus-utilities.h
 
 DBUS_INTERFACES += \
-    ../../dbus/io.qt.applicationinstaller.xml \
+    ../../dbus-lib/io.qt.applicationinstaller.xml \
     appmanif
-
-OTHER_FILES += \
-    controller.qdoc \
 
 load(qt_tool)
 
